@@ -27,6 +27,7 @@
 #  include "hydra/file_reader.h"
 #endif
 
+#include "app/cycles_lightmass.h"
 #include "app/cycles_xml.h"
 #include "app/oiio_output_driver.h"
 
@@ -101,6 +102,10 @@ static void scene_init()
 {
   options.scene = options.session->scene.get();
 
+  if (string_endswith(string_to_lower(options.filepath), ".scenegz")) {
+    import_lightmass_scene(options.scene, options.filepath.c_str());
+  }
+  else
   /* Read XML or USD */
 #ifdef WITH_USD
   if (!string_endswith(string_to_lower(options.filepath), ".xml")) {
@@ -141,6 +146,10 @@ static void session_init()
   if (!options.output_filepath.empty()) {
     options.session->set_output_driver(make_unique<OIIOOutputDriver>(
         options.output_filepath, options.output_pass, session_print));
+  }
+  else {
+    // todo: lightmass standalone implementation
+    options.session->set_output_driver(make_unique<SwarmOutputDriver>());
   }
 
   if (options.session_params.background && !options.quiet) {

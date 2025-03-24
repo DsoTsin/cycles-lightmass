@@ -1,0 +1,20 @@
+/* SPDX-FileCopyrightText: 2011-2022 Blender Foundation
+ *
+ * SPDX-License-Identifier: Apache-2.0 */
+
+#include "node_fresnel.h"
+#include "stdcycles.h"
+
+shader node_lightmass_bsdf(color Diffuse = 0.8,
+                         color Emissive = 0.0,
+                         color Transmission = 1.0,
+                         float Roughness = 0.0,
+                         normal Normal = N,
+                         output closure color BSDF = 0)
+{
+  // todo:
+  if (Roughness == 0.0)
+    BSDF = Diffuse * diffuse(Normal);
+  else
+    BSDF = oren_nayar_diffuse_bsdf(Normal, clamp(Diffuse, 0.0, 1.0), Roughness);
+}
