@@ -1,0 +1,348 @@
+# echo("error: " + target_os + "__" + target_arch)
+
+if (__is_generate__) {
+    echo("ok")
+}
+
+if (var_exists("__is_build__")) {
+    echo(__is_build__)
+}
+
+rule("zst_gpu_kernels") {
+    source_exts = [ "cu" ]
+    override_builtin = true
+    flags = [ "" ]
+    //output_dir = ...
+    //
+}
+
+config("common_config") {
+    include_dirs = [
+        "src",
+        "third_party/atomic",
+        $"lib/${target_os}_${target_arch}/OpenImageIO/include",
+        $"lib/${target_os}_${target_arch}/tbb/include",
+        $"lib/${target_os}_${target_arch}/zstd/include",
+        $"lib/${target_os}_${target_arch}/pugixml/include",
+        "third_party/mikktspace",
+        "third_party/sky/include"
+    ]
+    
+    defines = [ "WITH_PUGIXML", "WITH_SYSTEM_PUGIXML" ]
+    match(target_os) {
+        "windows" => { 
+            include_dirs += [
+                "third_party/cuew/include",
+                cuda.optix_dir + "/include"
+            ]
+            defines += [ 
+                "WITH_CUDA", 
+                "WITH_OPTIX", 
+                "WITH_CUDA_DYNLOAD",
+                $"CYCLES_RUNTIME_OPTIX_ROOT_DIR=\"${cuda.optix_dir}/include\""
+            ]
+        }
+        "android" => {
+        }
+        "ios" => {
+        }
+        "macos" => {
+            libs = [ "objc" ]
+        }
+        "linux" => {
+            defines += [ 
+                "WITH_CUDA",
+                "WITH_CUDA_DYNLOAD",
+                "WITH_OPTIX"
+            ]
+            include_dirs += [
+                "third_party/cuew/include"
+            ]
+        }
+    }
+
+    defines += [ 
+        "CCL_NAMESPACE_BEGIN=namespace ccl {",
+        "CCL_NAMESPACE_END=}"
+    ]
+}
+
+source_set("bvh_srcs") {
+    scan_patterns = [
+        "src/bvh/**.h",
+        "src/bvh/*.cpp"
+    ]
+    match(target_os) {
+        "windows" => {
+        }
+        "android" => {
+        }
+        "ios" => {
+        }
+        "macos" => {
+            scan_patterns += "src/bvh/**.mm"
+        }
+        "linux" => {
+        }
+    }
+    configs = [ ":common_config" ]
+    sources = list_files(scan_patterns)
+    visibility = [":*"]
+}
+
+source_set("device_srcs") {
+    scan_patterns = [
+        "src/device/**.h",
+        "src/device/*.cpp",
+        "src/device/cpu/**.h",
+        "src/device/cpu/*.cpp",
+        "src/device/dummy/**.h",
+        "src/device/dummy/*.cpp",
+        "src/device/multi/**.h",
+        "src/device/multi/*.cpp"
+    ]
+    match(target_os) {
+        "windows" => {
+            scan_patterns += [
+                "src/device/cuda/**.h",
+                "src/device/cuda/**.cpp",
+                "src/device/optix/**.h",
+                "src/device/optix/**.cpp",
+                "src/device/hip/**.h",
+                "src/device/hip/**.cpp",
+                "src/device/hiprt/**.h",
+                "src/device/hiprt/**.cpp",
+                "src/device/oneapi/**.h",
+                "src/device/oneapi/**.cpp" // lack vulkan ??
+            ]
+        }
+        "android" => {
+        }
+        "ios" => {
+        }
+        "macos" => {
+            scan_patterns += [
+                "src/device/metal/**.h",
+                "src/device/metal/**.mm"
+            ]
+        }
+        "linux" => {
+            scan_patterns += [
+                "src/device/cuda/**.h",
+                "src/device/cuda/**.cpp",
+                "src/device/optix/**.h",
+                "src/device/optix/**.cpp",
+                "src/device/hip/**.h",
+                "src/device/hip/**.cpp",
+                "src/device/hiprt/**.h",
+                "src/device/hiprt/**.cpp",
+                "src/device/oneapi/**.h",
+                "src/device/oneapi/**.cpp"
+            ]
+        }
+    }
+    configs = [ ":common_config" ]
+    sources = list_files(scan_patterns)
+    visibility = [":*"]
+}
+source_set("kernel_srcs") {
+    scan_patterns = [
+        "src/kernel/**.h",
+        "src/kernel/device/cpu/*.cpp",
+        "src/kernel/device/cpu/*.cpp"
+    ]
+    configs = [ ":common_config" ]
+    sources = list_files(scan_patterns)
+    visibility = [":*"]
+}
+source_set("graph_srcs") {
+    scan_patterns = [
+        "src/graph/**.h",
+        "src/graph/*.cpp"
+    ]
+    configs = [ ":common_config" ]
+    sources = list_files(scan_patterns)
+    visibility = [":*"]
+}
+source_set("integrator_srcs") {
+    scan_patterns = [
+        "src/integrator/**.h",
+        "src/integrator/*.cpp"
+    ]
+    configs = [ ":common_config" ]
+    sources = list_files(scan_patterns)
+    visibility = [":*"]
+}
+source_set("lightmass_srcs") {
+    scan_patterns = [
+        "src/lightmass/**.h",
+        "src/lightmass/*.cpp"
+    ]
+    configs = [ ":common_config" ]
+    sources = list_files(scan_patterns)
+    visibility = [":*"]
+}
+source_set("util_srcs") {
+    scan_patterns = [
+        "src/util/**.h",
+        "src/util/*.cpp",
+        "third_party/sky/source/*.cpp",
+        "third_party/cuew/src/*.c"
+    ]
+    configs = [ ":common_config" ]
+    sources = list_files(scan_patterns)
+    visibility = [":*"]
+}
+source_set("subd_srcs") {
+    scan_patterns = [
+        "src/subd/**.h",
+        "src/subd/*.cpp"
+    ]
+    configs = [ ":common_config" ]
+    sources = list_files(scan_patterns)
+    visibility = [":*"]
+}
+source_set("scene_srcs") {
+    scan_patterns = [
+        "src/scene/**.h",
+        "src/scene/*.cpp"
+    ]
+    configs = [ ":common_config" ]
+    sources = list_files(scan_patterns)
+    visibility = [":*"]
+}
+source_set("session_srcs") {
+    scan_patterns = [
+        "src/session/**.h",
+        "src/session/*.cpp"
+    ]
+    configs = [ ":common_config" ]
+    sources = list_files(scan_patterns)
+    visibility = [":*"]
+}
+
+static_library("cycles_util") {
+    deps = [ ":util_srcs" ]
+    defines = [ "LIB_BUILD=1", "BUILD_SHARED_LIB=1" ]
+    on_init = () {
+    }
+    frameworks = [ "Cocoa", "AppKit", "QuartzCore" ]
+}
+static_library("cycles_graph") {
+    deps = [ ":graph_srcs" ]
+}
+static_library("cycles_device") {
+    deps = [ ":device_srcs" ]
+}
+static_library("cycles_kernel") {
+    deps = [ ":kernel_srcs" ]
+}
+static_library("cycles_subd") {
+    deps = [ ":subd_srcs" ]
+}
+static_library("cycles_bvh") {
+    deps = [ ":bvh_srcs" ]
+}
+static_library("cycles_integrator") {
+    deps = [ ":integrator_srcs" ]
+}
+static_library("cycles_scene") {
+    deps = [ ":scene_srcs" ]
+}
+static_library("cycles_lightmass") {
+    deps = [ ":lightmass_srcs" ]
+    match(target_os) {
+        "${target_os}" => { 
+            include_dirs = [ $"lib/${target_os}_${target_arch}/zstd/include" ]
+        }
+    }
+}
+static_library("cycles_session") {
+    deps = [ ":session_srcs" ]
+}
+executable("cycles-lightmass") {
+    sources = [
+        "src/app/cycles_lightmass.cpp",
+        "src/app/cycles_standalone.cpp",
+        "src/app/cycles_xml.cpp",
+        "src/app/oiio_output_driver.cpp"
+    ]
+    configs = [ ":common_config" ]
+    deps = [ 
+        ":cycles_graph",
+        ":cycles_scene",
+        ":cycles_util",
+        ":cycles_session",
+        ":cycles_device",
+        ":cycles_bvh",
+        ":cycles_kernel",
+        ":cycles_subd",
+        ":cycles_lightmass",
+        ":cycles_integrator"
+    ]
+    lib_dirs = [ 
+        $"lib/${target_os}_${target_arch}/tbb/lib/",
+        $"lib/${target_os}_${target_arch}/pugixml/lib/",
+        $"lib/${target_os}_${target_arch}/zstd/lib",
+        $"lib/${target_os}_${target_arch}/OpenImageIO/lib"
+    ]
+
+    match (target_os) {
+        "windows" => {
+            libs = [
+                "advapi32.lib",
+                "zstd_static.lib"
+            ]
+        }
+    }
+
+    // runtime dependencies
+    rt_deps = []
+
+    match (target_config) {
+        "debug" => {
+            match (target_os) {
+                "windows" => {
+                    libs += [
+                        "tbb_debug.lib",
+                        "tbbmalloc_debug.lib",
+                        "OpenImageIO_d.lib",
+                        "pugixml_d.lib",
+                        "OpenImageIO_Util_d.lib"
+                    ]
+                }
+            }
+            rt_deps += [
+                $"lib/${target_os}_${target_arch}/tbb/bin/tbb12_debug.dll",
+                $"lib/${target_os}_${target_arch}/tbb/bin/tbbmalloc_debug.dll",
+                $"lib/${target_os}_${target_arch}/OpenImageIO/bin/OpenImageIO_Util_d.dll",
+                $"lib/${target_os}_${target_arch}/OpenImageIO/bin/OpenImageIO_d.dll"
+            ]
+        }
+        "release" | "develop" => {
+            match (target_os) {
+                "windows" => {
+                    libs += [
+                        "tbb.lib",
+                        "tbbmalloc.lib",
+                        "OpenImageIO.lib",
+                        "pugixml.lib",
+                        "OpenImageIO_Util.lib"
+                    ]
+                }
+            }
+            rt_deps += [
+                $"lib/${target_os}_${target_arch}/tbb/bin/tbb12.dll",
+                $"lib/${target_os}_${target_arch}/tbb/bin/tbbmalloc.dll",
+                $"lib/${target_os}_${target_arch}/OpenImageIO/bin/OpenImageIO_Util.dll",
+                $"lib/${target_os}_${target_arch}/OpenImageIO/bin/OpenImageIO.dll",
+                $"lib/${target_os}_${target_arch}/OpenColorIO/bin/OpenColorIO_2_4.dll",
+                $"lib/${target_os}_${target_arch}/imath/bin/imath.dll",
+                $"lib/${target_os}_${target_arch}/openexr/bin/OpenEXR.dll",
+                $"lib/${target_os}_${target_arch}/openexr/bin/IlmThread.dll",
+                $"lib/${target_os}_${target_arch}/openexr/bin/Iex.dll",
+                $"lib/${target_os}_${target_arch}/openexr/bin/OpenEXRCore.dll"
+            ]
+        }
+    }
+}

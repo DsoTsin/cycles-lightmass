@@ -10,6 +10,7 @@ set(INC
   ..
 )
 set(INC_SYS
+    ${ZSTD_INCLUDE_DIRS}
 )
 
 set(LIB
@@ -21,6 +22,7 @@ set(LIB
   cycles_subd
   cycles_graph
   cycles_util
+  ${ZSTD_LIBRARIES}
 )
 
 if(WITH_ALEMBIC)
@@ -80,7 +82,9 @@ if(WITH_CYCLES_STANDALONE)
   set(SRC
     cycles_standalone.cpp
     cycles_xml.cpp
-    cycles_xml.h
+    cycles_xml.h    
+    cycles_lightmass.cpp
+    cycles_lightmass.h
     oiio_output_driver.cpp
     oiio_output_driver.h
   )
@@ -98,6 +102,8 @@ if(WITH_CYCLES_STANDALONE)
 
   add_executable(cycles ${SRC} ${INC} ${INC_SYS})
   unset(SRC)
+
+  list(APPEND LIB cycles_lightmass)
 
   target_link_libraries(cycles PRIVATE ${LIB})
 

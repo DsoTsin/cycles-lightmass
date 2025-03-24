@@ -27,6 +27,7 @@ set(SRC_OSL
   node_convert_from_point.osl
   node_convert_from_vector.osl
   node_diffuse_bsdf.osl
+  node_lightmass_bsdf.osl
   node_displacement.osl
   node_vector_displacement.osl
   node_emission.osl
