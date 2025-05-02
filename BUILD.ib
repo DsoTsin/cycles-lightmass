@@ -184,6 +184,8 @@ source_set("integrator_srcs") {
 }
 source_set("lightmass_srcs") {
     scan_patterns = [
+        "src/baker/**.h",
+        "src/baker/**.cpp",
         "src/lightmass/**.h",
         "src/lightmass/*.cpp"
     ]

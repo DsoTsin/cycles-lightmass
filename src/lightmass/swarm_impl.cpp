@@ -21,6 +21,10 @@
 #pragma comment(lib, "mscoree.lib")
 
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
+
+#ifdef SendMessage
+#undef SendMessage
+#endif
 #endif
 
 
