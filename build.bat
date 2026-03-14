@@ -1,0 +1,1 @@
+C:\Users\Station\Desktop\IrisBuild\build\bin\Debug\ib.exe C:\Users\Station\Desktop\cycles\BUILD.ib /build=cycles-lightmass /target_os=windows /target_config=Debug /target_arch=x64

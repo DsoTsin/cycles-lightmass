@@ -6,25 +6,40 @@
 #ifdef _WIN32
 // Define WIN32_LEAN_AND_MEAN to exclude rarely-used services from windows headers.
 #  define UNICODE
-#define WIN32_LEAN_AND_MEAN
-#include <assert.h>
-#include <metahost.h>
-#include <windows.h>
+#  define WIN32_LEAN_AND_MEAN
+#  include <assert.h>
+#  include <windows.h>
 
-#include <DbgHelp.h>
-#include <ErrorRep.h>
-#include <Werapi.h>
+#  if defined(__has_include)
+#    if __has_include(<metahost.h>)
+#      include <metahost.h>
+#      define CCL_HAS_METAHOST 1
+#    else
+#      define CCL_HAS_METAHOST 0
+#    endif
+#  else
+#    include <metahost.h>
+#    define CCL_HAS_METAHOST 1
+#  endif
 
-#pragma comment(lib, "Faultrep.lib")
-#pragma comment(lib, "wer.lib")
+#  include <DbgHelp.h>
+#  include <ErrorRep.h>
+#  include <Werapi.h>
 
-#pragma comment(lib, "mscoree.lib")
+#  pragma comment(lib, "Faultrep.lib")
+#  pragma comment(lib, "wer.lib")
 
+#  if CCL_HAS_METAHOST
+#    pragma comment(lib, "mscoree.lib")
+#  endif
+
+#  if CCL_HAS_METAHOST
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
+#  endif
 
-#ifdef SendMessage
-#undef SendMessage
-#endif
+#  ifdef SendMessage
+#    undef SendMessage
+#  endif
 #endif
 
 
@@ -577,6 +592,10 @@ bool uswarm_interface::IsJobProcessRunning(int32 *OutStatus)
 bool uswarm_interface::initialize(const TCHAR *dll_path)
 {
 #if PLATFORM_WINDOWS
+#  if !CCL_HAS_METAHOST
+  (void)dll_path;
+  return false;
+#  else
   ICLRMetaHost *MetaHost = NULL;
   ICLRRuntimeHost *RuntimeHost = NULL;
 
@@ -630,6 +649,7 @@ bool uswarm_interface::initialize(const TCHAR *dll_path)
     // ensureMsgf(false, TEXT("Error creating Swarm instance bridge."));
     return false;
   }
+#  endif
 #endif  // PLATFORM_WINDOWS
 
   return true;
@@ -646,7 +666,13 @@ void SwarmOutputDriver::write_render_tile(const Tile &tile) {
 // @see blender/source/blender/render/intern/bake.cc
 bool SwarmOutputDriver::read_render_tile(const Tile &tile)
 {
-  //tile.set_pass_pixels(b_pass.name(), b_pass.channels(), (float *)b_pass.rect());
+#if 0
+  tile.set_pass_pixels(b_pass.name(), b_pass.channels(), (float *)b_pass.rect());
+  for (BL::RenderPass &b_pass : b_rlay.passes) {
+    tile.set_pass_pixels(b_pass.name(), b_pass.channels(), (float *)b_pass.rect());
+  }
+#endif
+
   return OutputDriver::read_render_tile(tile);
 }
 

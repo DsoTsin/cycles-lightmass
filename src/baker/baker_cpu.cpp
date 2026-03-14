@@ -16,10 +16,14 @@
 #include "session/session.h"
 #include "scene/shader.h"
 #include "scene/volume.h"
+#include "util/image.h"
 #include "util/path.h"
 #include "util/math.h"
 
+#include <cfloat>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 
 #include "OpenImageIO\imagebuf.h"
 #include "OpenImageIO\imagebufalgo.h"
@@ -64,18 +68,18 @@ typedef struct BakeDataZSpan {
 
 typedef struct MyBakeData {
   int width, height;
-  ImageBuf buffer_combined;
-  ImageBuf buffer_primitive_id;
-  ImageBuf buffer_differencial;
-  ImageBuf buffer_uv;
+  OIIO::ImageBuf buffer_combined;
+  OIIO::ImageBuf buffer_primitive_id;
+  OIIO::ImageBuf buffer_differencial;
+  OIIO::ImageBuf buffer_uv;
 
   MyBakeData(int width, int height)
       : width(width),
         height(height),
-        buffer_combined(ImageSpec(width, height, 4, TypeDesc(TypeDesc::FLOAT))),
-        buffer_primitive_id(ImageSpec(width, height, 4, TypeDesc(TypeDesc::FLOAT))),
-        buffer_differencial(ImageSpec(width, height, 4, TypeDesc(TypeDesc::FLOAT))),
-        buffer_uv(ImageSpec(width, height, 2, TypeDesc(TypeDesc::FLOAT)))
+        buffer_combined(ImageSpec(width, height, 4, OIIO::TypeDesc(OIIO::TypeDesc::FLOAT))),
+        buffer_primitive_id(ImageSpec(width, height, 4, OIIO::TypeDesc(OIIO::TypeDesc::FLOAT))),
+        buffer_differencial(ImageSpec(width, height, 4, OIIO::TypeDesc(OIIO::TypeDesc::FLOAT))),
+        buffer_uv(ImageSpec(width, height, 2, OIIO::TypeDesc(OIIO::TypeDesc::FLOAT)))
   {
   }
 
@@ -177,8 +181,8 @@ static void zbuf_add_to_span(ZSpan *zspan, const float v1[2], const float v2[2])
     maxv = v1;
   }
 
-  my0 = ceil(minv[1]);
-  my2 = floor(maxv[1]);
+  my0 = (int)std::ceil(minv[1]);
+  my2 = (int)std::floor(maxv[1]);
 
   if (my2 < 0 || my0 >= zspan->recty) {
     return;
@@ -341,8 +345,8 @@ void zspan_scanconvert(ZSpan *zspan,
 
   for (i = 0, y = my2; y >= my0; i++, y--, span1--, span2--) {
 
-    sn1 = floor(min_ff(*span1, *span2));
-    sn2 = floor(max_ff(*span1, *span2));
+    sn1 = (int)std::floor(min_ff(*span1, *span2));
+    sn2 = (int)std::floor(max_ff(*span1, *span2));
     sn1++;
 
     if (sn2 >= rectx) {
@@ -421,8 +425,13 @@ void populate_bake_data(const Mesh &mesh, size_t uv_map_index, MyBakeData *data)
   }
   zbuf_alloc_span(bd.zspan, image_width, image_height);
 
-  Attribute *attributes = mesh.attributes.find(ATTR_STD_UV);
-  float2 *fdata = attributes[uv_map_index].data_float2();
+  Attribute *attribute = mesh.attributes.find(ATTR_STD_UV);
+  if (attribute == nullptr) {
+    return;
+  }
+
+  static_cast<void>(uv_map_index);
+  float2 *fdata = attribute->data_float2();
   size_t triangles_count = mesh.num_triangles();
 
   for (size_t i = 0; i < triangles_count; i++) {
