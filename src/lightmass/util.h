@@ -291,11 +291,12 @@ struct FLinearColorUtils {
   /** Converts a linear space RGB color to linear space XYZ. */
     FORCEINLINE static FLinearColor LinearRGBToXYZ(const FLinearColor& InColor) {
       // RGB to XYZ linear transformation used by sRGB
-      float x = ccl::dot(ccl::make_float3(0.4124564f, 0.3575761f, 0.1804375f), ccl::make_float3(InColor));
+      float x = ccl::dot(ccl::make_float3(0.4124564f, 0.3575761f, 0.1804375f),
+                         ccl::make_float3(InColor.R, InColor.G, InColor.B));
       float y = ccl::dot(ccl::make_float3(0.2126729f, 0.7151522f, 0.0721750f),
-                         ccl::make_float3(InColor));
+                         ccl::make_float3(InColor.R, InColor.G, InColor.B));
       float z = ccl::dot(ccl::make_float3(0.0193339f, 0.1191920f, 0.9503041f),
-                         ccl::make_float3(InColor));
+                         ccl::make_float3(InColor.R, InColor.G, InColor.B));
       return FLinearColor{x, y, z};
   }
 
@@ -329,7 +330,7 @@ struct FLinearColorUtils {
   {
 
     // Convert to HSV space for the saturation adjustment
-    ccl::float3 HSVColor = ccl::rgb_to_hsv(ccl::make_float3(InColor));
+    ccl::float3 HSVColor = ccl::rgb_to_hsv(ccl::make_float3(InColor.R, InColor.G, InColor.B));
 
     // Clamp the range to what's expected
     SaturationFactor = ccl::clamp(SaturationFactor, 0.0f, 2.0f);
