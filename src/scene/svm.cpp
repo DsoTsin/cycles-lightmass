@@ -43,7 +43,7 @@ void SVMShaderManager::device_update_shader(Scene *scene,
   compiler.background = (shader == scene->background->get_shader(scene));
   compiler.compile(shader, *svm_nodes, 0, &summary);
 
-  VLOG_WORK << "Compilation summary:\n"
+  LOG_DEBUG << "Compilation summary:\n"
             << "Shader name: " << shader->name << "\n"
             << summary.full_report();
 }
@@ -65,7 +65,7 @@ void SVMShaderManager::device_update_specific(Device *device,
 
   const int num_shaders = scene->shaders.size();
 
-  VLOG_INFO << "Total " << num_shaders << " shaders.";
+  LOG_INFO << "Total " << num_shaders << " shaders.";
 
   const double start_time = time_dt();
 
@@ -132,14 +132,12 @@ void SVMShaderManager::device_update_specific(Device *device,
     return;
   }
 
-  dscene->svm_nodes.copy_to_device();
-
   device_update_common(device, dscene, scene, progress);
 
   update_flags = UPDATE_NONE;
 
-  VLOG_INFO << "Shader manager updated " << num_shaders << " shaders in " << time_dt() - start_time
-            << " seconds.";
+  LOG_INFO << "Shader manager updated " << num_shaders << " shaders in " << time_dt() - start_time
+           << " seconds.";
 }
 
 void SVMShaderManager::device_free(Device *device, DeviceScene *dscene, Scene *scene)
@@ -219,9 +217,8 @@ int SVMCompiler::stack_find_offset(const int size)
 
   if (!compile_failed) {
     compile_failed = true;
-    fprintf(stderr,
-            "Cycles: out of SVM stack space, shader \"%s\" too big.\n",
-            current_shader->name.c_str());
+    LOG_ERROR << "Shader graph: out of SVM stack space, shader \"" << current_shader->name
+              << "\" too big.";
   }
 
   return 0;
@@ -308,6 +305,24 @@ int SVMCompiler::stack_assign_if_linked(ShaderOutput *output)
 {
   if (!output->links.empty()) {
     return stack_assign(output);
+  }
+
+  return SVM_STACK_INVALID;
+}
+
+int SVMCompiler::stack_assign_if_not_equal(ShaderInput *input, const float value)
+{
+  if (is_linked(input) || input->parent->get_float(input->socket_type) != value) {
+    return stack_assign(input);
+  }
+
+  return SVM_STACK_INVALID;
+}
+
+int SVMCompiler::stack_assign_if_not_equal(ShaderInput *input, const float3 value)
+{
+  if (is_linked(input) || input->parent->get_float3(input->socket_type) != value) {
+    return stack_assign(input);
   }
 
   return SVM_STACK_INVALID;
@@ -498,7 +513,7 @@ void SVMCompiler::generate_closure_node(ShaderNode *node, CompilerState *state)
 {
   /* Skip generating closure that are not supported or needed for a particular
    * type of shader. For example a BSDF in a volume shader. */
-  const int node_feature = node->get_feature();
+  const uint node_feature = node->get_feature();
   if ((state->node_feature_mask & node_feature) != node_feature) {
     return;
   }
@@ -540,7 +555,7 @@ void SVMCompiler::generate_closure_node(ShaderNode *node, CompilerState *state)
       }
     }
     if (node->has_bump()) {
-      current_shader->has_bump = true;
+      current_shader->has_bump_from_surface = true;
     }
   }
 }
@@ -805,20 +820,17 @@ void SVMCompiler::compile_type(Shader *shader, ShaderGraph *graph, ShaderType ty
     switch (type) {
       case SHADER_TYPE_SURFACE: /* generate surface shader */
         find_aov_nodes_and_dependencies(state.aov_nodes, graph, &state);
-        if (clin->link) {
-          shader->has_surface = true;
+        if (shader->has_surface) {
           state.node_feature_mask = KERNEL_FEATURE_NODE_MASK_SURFACE;
         }
         break;
       case SHADER_TYPE_VOLUME: /* generate volume shader */
-        if (clin->link) {
-          shader->has_volume = true;
+        if (shader->has_volume) {
           state.node_feature_mask = KERNEL_FEATURE_NODE_MASK_VOLUME;
         }
         break;
       case SHADER_TYPE_DISPLACEMENT: /* generate displacement shader */
-        if (clin->link) {
-          shader->has_displacement = true;
+        if (shader->has_displacement) {
           state.node_feature_mask = KERNEL_FEATURE_NODE_MASK_DISPLACEMENT;
         }
         break;
@@ -878,36 +890,16 @@ void SVMCompiler::compile(Shader *shader,
   svm_nodes.push_back_slow(make_int4(NODE_SHADER_JUMP, 0, 0, 0));
 
   /* copy graph for shader with bump mapping */
-  ShaderNode *output = shader->graph->output();
   const int start_num_svm_nodes = svm_nodes.size();
 
   const double time_start = time_dt();
 
-  const bool has_bump = (shader->get_displacement_method() != DISPLACE_TRUE) &&
-                        output->input("Surface")->link && output->input("Displacement")->link;
-
-  /* finalize */
-  {
-    const scoped_timer timer((summary != nullptr) ? &summary->time_finalize : nullptr);
-    shader->graph->finalize(scene, has_bump, shader->get_displacement_method() == DISPLACE_BOTH);
-  }
+  const bool has_bump_from_displacement = shader->has_bump_from_displacement;
 
   current_shader = shader;
 
-  shader->has_surface = false;
-  shader->has_surface_transparent = false;
-  shader->has_surface_raytrace = false;
-  shader->has_surface_bssrdf = false;
-  shader->has_bump = has_bump;
-  shader->has_bssrdf_bump = has_bump;
-  shader->has_volume = false;
-  shader->has_displacement = false;
-  shader->has_surface_spatial_varying = false;
-  shader->has_volume_spatial_varying = false;
-  shader->has_volume_attribute_dependency = false;
-
   /* generate bump shader */
-  if (has_bump) {
+  if (has_bump_from_displacement) {
     const scoped_timer timer((summary != nullptr) ? &summary->time_generate_bump : nullptr);
     compile_type(shader, shader->graph.get(), SHADER_TYPE_BUMP);
     svm_nodes[index].y = svm_nodes.size();
@@ -920,7 +912,7 @@ void SVMCompiler::compile(Shader *shader,
     compile_type(shader, shader->graph.get(), SHADER_TYPE_SURFACE);
     /* only set jump offset if there's no bump shader, as the bump shader will fall thru to this
      * one if it exists */
-    if (!has_bump) {
+    if (!has_bump_from_displacement) {
       svm_nodes[index].y = svm_nodes.size();
     }
     svm_nodes.append(current_svm_nodes);
@@ -959,7 +951,6 @@ void SVMCompiler::compile(Shader *shader,
 SVMCompiler::Summary::Summary()
     : num_svm_nodes(0),
       peak_stack_usage(0),
-      time_finalize(0.0),
       time_generate_surface(0.0),
       time_generate_bump(0.0),
       time_generate_volume(0.0),
@@ -975,15 +966,13 @@ string SVMCompiler::Summary::full_report() const
   report += string_printf("Peak stack usage:    %d\n", peak_stack_usage);
 
   report += string_printf("Time (in seconds):\n");
-  report += string_printf("Finalize:            %f\n", time_finalize);
+  report += string_printf("Generate:            %f\n",
+                          time_generate_surface + time_generate_bump + time_generate_volume +
+                              time_generate_displacement);
   report += string_printf("  Surface:           %f\n", time_generate_surface);
   report += string_printf("  Bump:              %f\n", time_generate_bump);
   report += string_printf("  Volume:            %f\n", time_generate_volume);
   report += string_printf("  Displacement:      %f\n", time_generate_displacement);
-  report += string_printf("Generate:            %f\n",
-                          time_generate_surface + time_generate_bump + time_generate_volume +
-                              time_generate_displacement);
-  report += string_printf("Total:               %f\n", time_total);
 
   return report;
 }

@@ -5,7 +5,10 @@
 #include <cstdlib>
 
 #include "device/device.h"
+
 #include "session/buffers.h"
+
+#include "util/log.h"
 
 CCL_NAMESPACE_BEGIN
 
@@ -65,7 +68,7 @@ BufferPass::BufferPass(const Pass *scene_pass)
 
 PassInfo BufferPass::get_info() const
 {
-  return Pass::get_info(type, include_albedo, !lightgroup.empty());
+  return Pass::get_info(type, mode, include_albedo, !lightgroup.empty());
 }
 
 /* --------------------------------------------------------------------

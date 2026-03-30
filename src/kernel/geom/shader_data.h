@@ -86,6 +86,7 @@ ccl_device_inline void shader_setup_from_ray(KernelGlobals kg,
       triangle_shader_setup(kg, sd);
     }
     else {
+      kernel_assert(sd->type == PRIMITIVE_MOTION_TRIANGLE);
       /* motion triangle */
       motion_triangle_shader_setup(kg, sd);
     }
@@ -324,9 +325,13 @@ ccl_device void shader_setup_from_curve(KernelGlobals kg,
   P_curve[3] = kernel_data_fetch(curve_keys, kb);
 
   /* Interpolate position and tangent. */
-  sd->P = make_float3(catmull_rom_basis_eval(P_curve, sd->u));
+  sd->P = (sd->type & PRIMITIVE_CURVE) == PRIMITIVE_CURVE_THICK_LINEAR ?
+              make_float3(linear_basis_eval(P_curve, sd->u)) :
+              make_float3(catmull_rom_basis_eval(P_curve, sd->u));
 #  ifdef __DPDU__
-  sd->dPdu = make_float3(catmull_rom_basis_derivative(P_curve, sd->u));
+  sd->dPdu = (sd->type & PRIMITIVE_CURVE) == PRIMITIVE_CURVE_THICK_LINEAR ?
+                 make_float3(linear_basis_derivative(P_curve, sd->u)) :
+                 make_float3(catmull_rom_basis_derivative(P_curve, sd->u));
 #  endif
 
   /* Transform into world space */
@@ -401,8 +406,7 @@ ccl_device_inline void shader_setup_from_background(KernelGlobals kg,
 /* ShaderData setup from point inside volume */
 
 #ifdef __VOLUME__
-ccl_device_inline void shader_setup_from_volume(KernelGlobals kg,
-                                                ccl_private ShaderData *ccl_restrict sd,
+ccl_device_inline void shader_setup_from_volume(ccl_private ShaderData *ccl_restrict sd,
                                                 const ccl_private Ray *ccl_restrict ray,
                                                 const int object)
 {

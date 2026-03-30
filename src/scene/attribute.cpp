@@ -320,12 +320,18 @@ const char *Attribute::standard_name(AttributeStandard std)
       return "tangent";
     case ATTR_STD_UV_TANGENT_SIGN:
       return "tangent_sign";
+    case ATTR_STD_UV_TANGENT_UNDISPLACED:
+      return "undisplaced_tangent";
+    case ATTR_STD_UV_TANGENT_SIGN_UNDISPLACED:
+      return "undisplaced_tangent_sign";
     case ATTR_STD_VERTEX_COLOR:
       return "vertex_color";
     case ATTR_STD_POSITION_UNDEFORMED:
       return "undeformed";
     case ATTR_STD_POSITION_UNDISPLACED:
       return "undisplaced";
+    case ATTR_STD_NORMAL_UNDISPLACED:
+      return "undisplaced_N";
     case ATTR_STD_MOTION_VERTEX_POSITION:
       return "motion_P";
     case ATTR_STD_MOTION_VERTEX_NORMAL:
@@ -511,15 +517,18 @@ Attribute *AttributeSet::add(AttributeStandard std, ustring name)
   if (geometry->is_mesh()) {
     switch (std) {
       case ATTR_STD_VERTEX_NORMAL:
+      case ATTR_STD_NORMAL_UNDISPLACED:
         attr = add(name, TypeNormal, ATTR_ELEMENT_VERTEX);
         break;
       case ATTR_STD_UV:
         attr = add(name, TypeFloat2, ATTR_ELEMENT_CORNER);
         break;
       case ATTR_STD_UV_TANGENT:
+      case ATTR_STD_UV_TANGENT_UNDISPLACED:
         attr = add(name, TypeVector, ATTR_ELEMENT_CORNER);
         break;
       case ATTR_STD_UV_TANGENT_SIGN:
+      case ATTR_STD_UV_TANGENT_SIGN_UNDISPLACED:
         attr = add(name, TypeFloat, ATTR_ELEMENT_CORNER);
         break;
       case ATTR_STD_VERTEX_COLOR:

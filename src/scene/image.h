@@ -55,7 +55,7 @@ class ImageMetaData {
  public:
   /* Set by ImageLoader.load_metadata(). */
   int channels;
-  size_t width, height, depth;
+  size_t width, height;
   size_t byte_size;
   ImageDataType type;
 
@@ -80,7 +80,7 @@ class ImageMetaData {
 /* Information about supported features that Image loaders can use. */
 class ImageDeviceFeatures {
  public:
-  bool has_nanovdb;
+  bool has_nanovdb = true;
 };
 
 /* Image loader base class, that can be subclassed to load image data
@@ -109,7 +109,7 @@ class ImageLoader {
   virtual int get_tile_number() const;
 
   /* Free any memory used for loading metadata and pixels. */
-  virtual void cleanup(){};
+  virtual void cleanup() {};
 
   /* Compare avoid loading the same image multiple times. */
   virtual bool equals(const ImageLoader &other) const = 0;
@@ -195,7 +195,6 @@ class ImageManager {
     ImageMetaData metadata;
     unique_ptr<ImageLoader> loader;
 
-    float frame;
     bool need_metadata;
     bool need_load;
     bool builtin;

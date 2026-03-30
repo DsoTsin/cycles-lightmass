@@ -9,8 +9,6 @@ set(INC
 )
 
 set(SRC
-  alembic.cpp
-  alembic_read.cpp
   attribute.cpp
   background.cpp
   bake.cpp
@@ -54,8 +52,6 @@ set(SRC
 )
 
 set(SRC_HEADERS
-  alembic.h
-  alembic_read.h
   attribute.h
   bake.h
   background.h
@@ -128,27 +124,8 @@ if(WITH_OPENCOLORIO)
 endif()
 
 if(WITH_OPENVDB)
-  add_definitions(-DWITH_OPENVDB ${OPENVDB_DEFINITIONS})
-  list(APPEND INC_SYS
-    ${OPENVDB_INCLUDE_DIRS}
-  )
   list(APPEND LIB
     ${OPENVDB_LIBRARIES}
-  )
-
-  # This works around the issue described in #120317 and https://github.com/AcademySoftwareFoundation/openvdb/pull/1786
-  if(MSVC_CLANG)
-    set_source_files_properties(image_vdb.cpp PROPERTIES COMPILE_FLAGS -fno-delayed-template-parsing)
-  endif()
-endif()
-
-if(WITH_ALEMBIC)
-  add_definitions(-DWITH_ALEMBIC)
-  list(APPEND INC_SYS
-    ${ALEMBIC_INCLUDE_DIRS}
-  )
-  list(APPEND LIB
-    ${ALEMBIC_LIBRARIES}
   )
 endif()
 

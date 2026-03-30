@@ -7,6 +7,7 @@
 /* Minor modifications done to remove some code and change style. */
 
 #include "util/md5.h"
+#include "util/log.h"
 #include "util/path.h"
 
 #include <cstdio>
@@ -102,6 +103,10 @@ void MD5Hash::process(const uint8_t *data /*[64]*/)
     static const int w = 1;
 
     if (*((const uint8_t *)&w)) /* dynamic little-endian */ {
+#if defined(__GNUC__) && defined(__clang__)
+#  pragma clang diagnostic push
+#  pragma clang diagnostic ignored "-Wnull-pointer-subtraction"
+#endif
       /*
        * On little-endian machines, we can process properly aligned
        * data without copying it.
@@ -115,6 +120,9 @@ void MD5Hash::process(const uint8_t *data /*[64]*/)
         memcpy(xbuf, data, 64);
         X = xbuf;
       }
+#if defined(__GNUC__) && defined(__clang__)
+#  pragma clang diagnostic pop
+#endif
     }
     else { /* dynamic big-endian */
       /*
@@ -311,7 +319,7 @@ bool MD5Hash::append_file(const string &filepath)
   FILE *f = path_fopen(filepath, "rb");
 
   if (!f) {
-    fprintf(stderr, "MD5: failed to open file %s\n", filepath.c_str());
+    LOG_ERROR << "MD5: failed to open file " << filepath;
     return false;
   }
 

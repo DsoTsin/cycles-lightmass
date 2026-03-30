@@ -5,6 +5,7 @@
 #include "integrator/path_trace_display.h"
 
 #include "session/buffers.h"
+#include "session/display_driver.h"
 
 #include "util/log.h"
 
@@ -44,7 +45,7 @@ bool PathTraceDisplay::update_begin(const int texture_width, const int texture_h
   DCHECK(!update_state_.is_active);
 
   if (update_state_.is_active) {
-    LOG(ERROR) << "Attempt to re-activate update process.";
+    LOG_ERROR << "Attempt to re-activate update process.";
     return false;
   }
 
@@ -59,7 +60,7 @@ bool PathTraceDisplay::update_begin(const int texture_width, const int texture_h
   }
 
   if (!driver_->update_begin(params, texture_width, texture_height)) {
-    LOG(ERROR) << "PathTraceDisplay implementation could not begin update.";
+    LOG_ERROR << "PathTraceDisplay implementation could not begin update.";
     return false;
   }
 
@@ -73,7 +74,7 @@ void PathTraceDisplay::update_end()
   DCHECK(update_state_.is_active);
 
   if (!update_state_.is_active) {
-    LOG(ERROR) << "Attempt to deactivate inactive update process.";
+    LOG_ERROR << "Attempt to deactivate inactive update process.";
     return;
   }
 
@@ -100,7 +101,7 @@ void PathTraceDisplay::copy_pixels_to_texture(const half4 *rgba_pixels,
   DCHECK(update_state_.is_active);
 
   if (!update_state_.is_active) {
-    LOG(ERROR) << "Attempt to copy pixels data outside of PathTraceDisplay update.";
+    LOG_ERROR << "Attempt to copy pixels data outside of PathTraceDisplay update.";
     return;
   }
 
@@ -149,12 +150,12 @@ half4 *PathTraceDisplay::map_texture_buffer()
   DCHECK(update_state_.is_active);
 
   if (texture_buffer_state_.is_mapped) {
-    LOG(ERROR) << "Attempt to re-map an already mapped texture buffer.";
+    LOG_ERROR << "Attempt to re-map an already mapped texture buffer.";
     return nullptr;
   }
 
   if (!update_state_.is_active) {
-    LOG(ERROR) << "Attempt to copy pixels data outside of PathTraceDisplay update.";
+    LOG_ERROR << "Attempt to copy pixels data outside of PathTraceDisplay update.";
     return nullptr;
   }
 
@@ -172,7 +173,7 @@ void PathTraceDisplay::unmap_texture_buffer()
   DCHECK(texture_buffer_state_.is_mapped);
 
   if (!texture_buffer_state_.is_mapped) {
-    LOG(ERROR) << "Attempt to unmap non-mapped texture buffer.";
+    LOG_ERROR << "Attempt to unmap non-mapped texture buffer.";
     return;
   }
 
@@ -186,26 +187,35 @@ void PathTraceDisplay::unmap_texture_buffer()
  * Graphics interoperability.
  */
 
-DisplayDriver::GraphicsInterop PathTraceDisplay::graphics_interop_get()
+GraphicsInteropDevice PathTraceDisplay::graphics_interop_get_device()
 {
+  return driver_->graphics_interop_get_device();
+}
+
+GraphicsInteropBuffer &PathTraceDisplay::graphics_interop_get_buffer()
+{
+  GraphicsInteropBuffer &interop_buffer = driver_->graphics_interop_get_buffer();
   DCHECK(!texture_buffer_state_.is_mapped);
   DCHECK(update_state_.is_active);
 
   if (texture_buffer_state_.is_mapped) {
-    LOG(ERROR)
+    LOG_ERROR
         << "Attempt to use graphics interoperability mode while the texture buffer is mapped.";
-    return DisplayDriver::GraphicsInterop();
+    interop_buffer.clear();
+    return interop_buffer;
   }
 
   if (!update_state_.is_active) {
-    LOG(ERROR) << "Attempt to use graphics interoperability outside of PathTraceDisplay update.";
-    return DisplayDriver::GraphicsInterop();
+    LOG_ERROR << "Attempt to use graphics interoperability outside of PathTraceDisplay update.";
+    interop_buffer.clear();
+    return interop_buffer;
   }
 
   /* Assume that interop will write new values to the texture. */
   mark_texture_updated();
 
-  return driver_->graphics_interop_get();
+  driver_->graphics_interop_update_buffer();
+  return interop_buffer;
 }
 
 void PathTraceDisplay::graphics_interop_activate()
@@ -222,9 +232,9 @@ void PathTraceDisplay::graphics_interop_deactivate()
  * Drawing.
  */
 
-void PathTraceDisplay::clear()
+void PathTraceDisplay::zero()
 {
-  driver_->clear();
+  driver_->zero();
 }
 
 bool PathTraceDisplay::draw()

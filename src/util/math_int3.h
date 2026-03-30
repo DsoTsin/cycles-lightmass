@@ -77,6 +77,41 @@ ccl_device_inline int3 operator-(const int3 a, const int3 b)
   return make_int3(a.x - b.x, a.y - b.y, a.z - b.z);
 #  endif
 }
+
+ccl_device_inline int3 operator>>(const int3 a, const int i)
+{
+  return make_int3(a.x >> i, a.y >> i, a.z >> i);
+}
+
+ccl_device_inline int3 operator*(const int3 a, const int3 b)
+{
+  return make_int3(a.x * b.x, a.y * b.y, a.z * b.z);
+}
+
+ccl_device_inline int3 operator^(const int3 a, const int3 b)
+{
+  return make_int3(a.x ^ b.x, a.y ^ b.y, a.z ^ b.z);
+}
+
+ccl_device_inline int3 operator&(const int3 a, const int3 b)
+{
+  return make_int3(a.x & b.x, a.y & b.y, a.z & b.z);
+}
+
+ccl_device_inline int3 operator&(const int3 a, const int b)
+{
+#  ifdef __KERNEL_SSE__
+  return int3(_mm_and_si128(a.m128, _mm_set1_epi32(b)));
+#  else
+  return make_int3(a.x & b, a.y & b, a.z & b);
+#  endif
+}
+
+ccl_device_inline bool all(const int3 a)
+{
+  return a.x && a.y && a.z;
+}
+
 #endif /* !__KERNEL_METAL__ */
 
 CCL_NAMESPACE_END

@@ -130,7 +130,7 @@ ccl_device bool integrator_init_from_bake(KernelGlobals kg,
   int prim = __float_as_uint(primitive[2]);
   if (prim == -1) {
     /* Accumulate transparency for empty pixels. */
-    film_write_transparent(kg, state, 0, 1.0f, buffer);
+    film_write_transparent(kg, 0, 1.0f, buffer);
     return true;
   }
 
@@ -150,7 +150,7 @@ ccl_device bool integrator_init_from_bake(KernelGlobals kg,
                                              path_rng_2D(kg, rng_pixel, sample, PRNG_FILTER);
 
   /* Initialize path state for path integration. */
-  path_state_init_integrator(kg, state, sample, rng_pixel);
+  path_state_init_integrator(kg, state, sample, rng_pixel, one_spectrum());
 
   /* Barycentric UV. */
   float u = primitive[0];
@@ -211,7 +211,7 @@ ccl_device bool integrator_init_from_bake(KernelGlobals kg,
     integrator_state_write_ray(state, &ray);
 
     /* Setup next kernel to execute. */
-    integrator_path_init(kg, state, DEVICE_KERNEL_INTEGRATOR_SHADE_BACKGROUND);
+    integrator_path_init(state, DEVICE_KERNEL_INTEGRATOR_SHADE_BACKGROUND);
   }
   else {
     /* Surface baking. */

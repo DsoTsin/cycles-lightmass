@@ -136,9 +136,19 @@ void Light::tag_update(Scene *scene)
   if (is_modified()) {
     scene->light_manager->tag_update(scene, LightManager::LIGHT_MODIFIED);
   }
+  else {
+    for (const Node *node : get_used_shaders()) {
+      if (node->is_modified()) {
+        /* If the light shader is modified, the number of lights in the scene might change.
+         * Tag light manager for update. */
+        scene->light_manager->tag_update(scene, LightManager::LIGHT_MODIFIED);
+        break;
+      }
+    }
+  }
 }
 
-bool Light::has_contribution(Scene *scene)
+bool Light::has_contribution(const Scene *scene, const Object *object)
 {
   if (strength == zero_float3()) {
     return false;
@@ -147,7 +157,17 @@ bool Light::has_contribution(Scene *scene)
     return false;
   }
   if (light_type == LIGHT_BACKGROUND) {
+    /* Will be determined after finishing processing all the lights. */
     return true;
+  }
+  if (light_type == LIGHT_AREA) {
+    if ((get_sizeu() * get_sizev() * get_size() == 0.0f) ||
+        is_zero(transform_get_column(&object->get_tfm(), 0)) ||
+        is_zero(transform_get_column(&object->get_tfm(), 1)))
+    {
+      /* Area light with a size of zero does not contribute to the scene. */
+      return false;
+    }
   }
 
   const Shader *effective_shader = (get_shader()) ? get_shader() : scene->default_light;
@@ -177,6 +197,32 @@ void Light::get_uv_tiles(ustring /*map*/, unordered_set<int> & /*tiles*/)
 PrimitiveType Light::primitive_type() const
 {
   return PRIMITIVE_LAMP;
+}
+
+float Light::area(const Transform &tfm) const
+{
+  if (light_type == LIGHT_POINT || light_type == LIGHT_SPOT) {
+    /* Sphere area. */
+    const float area = 4.0f * M_PI_F * size * size;
+    return (area == 0.0f) ? 4.0f : area;
+  }
+  if (light_type == LIGHT_AREA) {
+    /* Rectangle area. */
+    const float3 axisu = transform_get_column(&tfm, 0);
+    const float3 axisv = transform_get_column(&tfm, 1);
+    float area = len(axisu * sizeu * size) * len(axisv * sizev * size);
+    if (ellipse) {
+      area *= M_PI_4_F;
+    }
+    return area;
+  }
+  if (light_type == LIGHT_DISTANT) {
+    /* Sun disk area. */
+    const float half_angle = angle / 2.0f;
+    return (half_angle > 0.0f) ? M_PI_F * sqr(sinf(half_angle)) : 1.0f;
+  }
+
+  return 1.0f;
 }
 
 /* Light Manager */
@@ -219,17 +265,17 @@ void LightManager::test_enabled_lights(Scene *scene)
     }
 
     Light *light = static_cast<Light *>(object->get_geometry());
-    light->is_enabled = light->has_contribution(scene);
+    light->is_enabled = light->has_contribution(scene, object);
     has_portal |= light->is_portal;
 
     if (light->light_type == LIGHT_BACKGROUND) {
       background_lights.push_back(light);
     }
 
-    num_lights++;
+    num_lights += light->is_enabled;
   }
 
-  VLOG_INFO << "Total " << num_lights << " lights.";
+  LOG_INFO << "Total " << num_lights << " lights.";
 
   bool background_enabled = false;
   int background_resolution = 0;
@@ -240,14 +286,16 @@ void LightManager::test_enabled_lights(Scene *scene)
      * - If we don't need it (no HDRs etc.)
      */
     Shader *shader = scene->background->get_shader(scene);
-    const bool disable_mis = !(has_portal || shader->has_surface_spatial_varying);
-    if (disable_mis) {
-      VLOG_INFO << "Background MIS has been disabled.\n";
-    }
     for (Light *light : background_lights) {
-      light->is_enabled = !disable_mis;
-      background_enabled = !disable_mis;
-      background_resolution = light->map_resolution;
+      light->is_enabled = has_portal || (light->use_mis && shader->has_surface_spatial_varying);
+      if (light->is_enabled) {
+        background_enabled = true;
+        background_resolution = light->map_resolution;
+      }
+    }
+
+    if (!background_enabled) {
+      LOG_INFO << "Background MIS has been disabled.";
     }
   }
 
@@ -342,7 +390,7 @@ void LightManager::device_update_distribution(Device * /*unused*/,
   /* Distribution size. */
   kintegrator->num_distribution = num_distribution;
 
-  VLOG_INFO << "Use light distribution with " << num_distribution << " emitters.";
+  LOG_INFO << "Use light distribution with " << num_distribution << " emitters.";
 
   /* Emission area. */
   KernelLightDistribution *distribution = dscene->light_distribution.alloc(num_distribution + 1);
@@ -817,8 +865,8 @@ void LightManager::device_update_tree(Device * /*unused*/,
   KernelLightLinkSet *klight_link_sets = dscene->data.light_link_sets;
   memset(klight_link_sets, 0, sizeof(dscene->data.light_link_sets));
 
-  VLOG_INFO << "Use light tree with " << num_emitters << " emitters and " << light_tree.num_nodes
-            << " nodes.";
+  LOG_INFO << "Use light tree with " << num_emitters << " emitters and " << light_tree.num_nodes
+           << " nodes.";
 
   if (!use_light_linking) {
     /* Regular light tree without linking. */
@@ -863,8 +911,8 @@ void LightManager::device_update_tree(Device * /*unused*/,
     KernelLightTreeNode *knodes = dscene->light_tree_nodes.alloc(light_link_nodes.size());
     memcpy(knodes, light_link_nodes.data(), light_link_nodes.size() * sizeof(*knodes));
 
-    VLOG_INFO << "Specialized light tree for light linking, with "
-              << light_link_nodes.size() - light_tree.num_nodes << " additional nodes.";
+    LOG_INFO << "Specialized light tree for light linking, with "
+             << light_link_nodes.size() - light_tree.num_nodes << " additional nodes.";
   }
 
   /* Copy arrays to device. */
@@ -973,9 +1021,9 @@ void LightManager::device_update_background(Device *device,
     }
     if (node->type == SkyTextureNode::get_node_type()) {
       SkyTextureNode *sky = (SkyTextureNode *)node;
-      if (sky->get_sky_type() == NODE_SKY_NISHITA && sky->get_sun_disc()) {
+      if (sky->get_sun_disc()) {
         /* Ensure that the input coordinates aren't transformed before they reach the node.
-         * If that is the case, the logic used for sampling the sun's location does not work
+         * If that is the case, the logic used for sampling the Sun's location does not work
          * and we have to fall back to map-based sampling. */
         const ShaderInput *vec_in = sky->input("Vector");
         if (vec_in && vec_in->link && vec_in->link->parent) {
@@ -989,7 +1037,7 @@ void LightManager::device_update_background(Device *device,
           }
         }
 
-        /* Determine sun direction from lat/long and texture mapping. */
+        /* Determine Sun direction from lat/long and texture mapping. */
         const float latitude = sky->get_sun_elevation();
         const float longitude = sky->get_sun_rotation() + M_PI_2_F;
         float3 sun_direction = make_float3(
@@ -997,11 +1045,11 @@ void LightManager::device_update_background(Device *device,
         const Transform sky_transform = transform_inverse(sky->tex_mapping.compute_transform());
         sun_direction = transform_direction(&sky_transform, sun_direction);
 
-        /* Pack sun direction and size. */
+        /* Pack Sun direction and size. */
         const float half_angle = sky->get_sun_size() * 0.5f;
         kbackground->sun = make_float4(sun_direction, half_angle);
 
-        /* empirical value */
+        /* Empirical value */
         kbackground->sun_weight = 4.0f;
         sun_average_radiance = sky->get_sun_average_radiance();
         environment_res.x = max(environment_res.x, 512);
@@ -1011,7 +1059,7 @@ void LightManager::device_update_background(Device *device,
     }
   }
 
-  /* If there's more than one sun, fall back to map sampling instead. */
+  /* If there's more than one Sun, fall back to map sampling instead. */
   kbackground->use_sun_guiding = (num_suns == 1);
   if (!kbackground->use_sun_guiding) {
     kbackground->sun_weight = 0.0f;
@@ -1029,14 +1077,13 @@ void LightManager::device_update_background(Device *device,
   if (res.x == 0) {
     res = environment_res;
     if (res.x > 0 && res.y > 0) {
-      VLOG_INFO << "Automatically set World MIS resolution to " << res.x << " by " << res.y
-                << "\n";
+      LOG_INFO << "Automatically set World MIS resolution to " << res.x << " by " << res.y;
     }
   }
   /* If it's still unknown, just use the default. */
   if (res.x == 0 || res.y == 0) {
     res = make_int2(1024, 512);
-    VLOG_INFO << "Setting World MIS resolution to default\n";
+    LOG_INFO << "Setting World MIS resolution to default";
   }
   kbackground->map_res_x = res.x;
   kbackground->map_res_y = res.y;
@@ -1077,7 +1124,7 @@ void LightManager::device_update_background(Device *device,
   const float map_average_radiance = cdf_total * M_PI_2_F;
   if (sun_average_radiance > 0.0f) {
     /* The weighting here is just a heuristic that was empirically determined.
-     * The sun's average radiance is much higher than the map's average radiance,
+     * The Sun's average radiance is much higher than the map's average radiance,
      * but we don't want to weight the background light too much because
      * visibility is not accounted for anyway. */
     background_light->set_average_radiance(0.8f * map_average_radiance +
@@ -1095,7 +1142,7 @@ void LightManager::device_update_background(Device *device,
 
   marg_cdf[res.y].y = 1.0f;
 
-  VLOG_WORK << "Background MIS build time " << time_dt() - time_start << "\n";
+  LOG_DEBUG << "Background MIS build time " << time_dt() - time_start;
 
   /* update device */
   dscene->light_background_marginal_cdf.copy_to_device();
@@ -1179,10 +1226,7 @@ void LightManager::device_update_lights(DeviceScene *dscene, Scene *scene)
       float len_v;
       const float3 axis_u = normalize_len(extentu, &len_u);
       const float3 axis_v = normalize_len(extentv, &len_v);
-      float area = len_u * len_v;
-      if (light->ellipse) {
-        area *= M_PI_4_F;
-      }
+      const float area = light->area(object->get_tfm());
       float invarea = (area != 0.0f) ? 1.0f / area : 1.0f;
       if (light->ellipse) {
         /* Negative inverse area indicates ellipse. */
@@ -1224,9 +1268,7 @@ void LightManager::device_update_lights(DeviceScene *dscene, Scene *scene)
       shader_id &= ~SHADER_AREA_LIGHT;
 
       const float radius = light->size;
-      const float invarea = (radius == 0.0f)   ? 1.0f / 4.0f :
-                            (light->normalize) ? 1.0f / (4.0f * M_PI_F * radius * radius) :
-                                                 1.0f;
+      const float invarea = (light->normalize) ? 1.0f / light->area(object->get_tfm()) : 1.0f;
 
       /* Convert radiant flux to radiance or radiant intensity. */
       const float eval_fac = invarea * M_1_PI_F;
@@ -1256,8 +1298,8 @@ void LightManager::device_update_lights(DeviceScene *dscene, Scene *scene)
       klights[light_index].distant.angle = angle;
       klights[light_index].distant.one_minus_cosangle = one_minus_cosangle;
       klights[light_index].distant.pdf = pdf;
-      klights[light_index].distant.eval_fac = (light->normalize && angle > 0) ?
-                                                  M_1_PI_F / sqr(sinf(angle)) :
+      klights[light_index].distant.eval_fac = (light->normalize) ?
+                                                  1.0f / light->area(object->get_tfm()) :
                                                   1.0f;
       klights[light_index].distant.half_inv_sin_half_angle = (angle == 0.0f) ?
                                                                  0.0f :
@@ -1293,11 +1335,8 @@ void LightManager::device_update_lights(DeviceScene *dscene, Scene *scene)
       float len_v;
       const float3 axis_u = normalize_len(extentu, &len_u);
       const float3 axis_v = normalize_len(extentv, &len_v);
-      float area = len_u * len_v;
-      if (light->ellipse) {
-        area *= M_PI_4_F;
-      }
-      float invarea = (light->normalize && area != 0.0f) ? 1.0f / area : 1.0f;
+      const float area = light->area(object->get_tfm());
+      float invarea = light->normalize ? 1.0f / area : 1.0f;
       if (light->ellipse) {
         /* Negative inverse area indicates ellipse. */
         invarea = -invarea;
@@ -1360,7 +1399,7 @@ void LightManager::device_update_lights(DeviceScene *dscene, Scene *scene)
     light_index++;
   }
 
-  VLOG_INFO << "Number of lights sent to the device: " << num_lights;
+  LOG_INFO << "Number of lights sent to the device: " << num_lights;
 
   dscene->lights.copy_to_device();
 }

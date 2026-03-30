@@ -75,7 +75,6 @@ void SubdAttributeInterpolation::setup()
 
 bool SubdAttributeInterpolation::support_interp_attribute(const Attribute &attr) const
 {
-  // TODO: Recompute UV tangent
   switch (attr.std) {
     /* Smooth normals are computed from derivatives, for linear interpolate. */
     case ATTR_STD_VERTEX_NORMAL:
@@ -121,7 +120,9 @@ void SubdAttributeInterpolation::setup_attribute(const Attribute &subd_attr, Att
   else if (Attribute::same_storage(subd_attr.type, TypeVector)) {
     setup_attribute_type<SubdFloat<float3>>(subd_attr, mesh_attr);
   }
-  else if (Attribute::same_storage(subd_attr.type, TypeFloat4)) {
+  else if (Attribute::same_storage(subd_attr.type, TypeFloat4) ||
+           Attribute::same_storage(subd_attr.type, TypeRGBA))
+  {
     setup_attribute_type<SubdFloat<float4>>(subd_attr, mesh_attr);
   }
 }
@@ -354,6 +355,7 @@ void SubdAttributeInterpolation::setup_attribute_corner_linear(const Attribute &
       for (int j = 1; j < face.num_corners; j++) {
         value_center += T::read(subd_data[face.start_corner + j]);
       }
+      value_center /= (float)face.num_corners;
 
       /* Compute value at corner at adjacent vertices. */
       const typename T::AccumType value_corner = T::read(subd_data[face.start_corner + corner]);
@@ -475,7 +477,7 @@ template<typename T>
 void SubdAttributeInterpolation::setup_attribute_face(const Attribute &subd_attr,
                                                       Attribute &mesh_attr)
 {
-  /* Copy value from face to triangle .*/
+  /* Copy value from face to triangle. */
   SubdAttribute attr;
   const typename T::Type *subd_data = reinterpret_cast<const typename T::Type *>(subd_attr.data());
   typename T::Type *mesh_data = reinterpret_cast<typename T::Type *>(mesh_attr.data());

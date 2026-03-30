@@ -54,7 +54,7 @@ ccl_device int bsdf_sheen_setup(KernelGlobals kg,
 }
 
 ccl_device Spectrum bsdf_sheen_eval(const ccl_private ShaderClosure *sc,
-                                    const float3 wi,
+                                    const float3 /*wi*/,
                                     const float3 wo,
                                     ccl_private float *pdf)
 {
@@ -65,19 +65,10 @@ ccl_device Spectrum bsdf_sheen_eval(const ccl_private ShaderClosure *sc,
   const float a = bsdf->transformA;
   const float b = bsdf->transformB;
 
-  if (dot(N, wo) <= 0.0f) {
-    *pdf = 0.0f;
-    return zero_spectrum();
-  }
-
   const float3 localO = to_local(wo, T, B, N);
-  if (localO.z <= 0.0f) {
-    *pdf = 0.0f;
-    return zero_spectrum();
-  }
 
   const float lenSqr = sqr(a * localO.x + b * localO.z) + sqr(a * localO.y) + sqr(localO.z);
-  const float val = M_1_PI_F * localO.z * sqr(a / lenSqr);
+  const float val = M_1_PI_F * fmaxf(localO.z, 0.0f) * sqr(a / lenSqr);
 
   *pdf = val;
   return make_spectrum(val);
@@ -85,7 +76,7 @@ ccl_device Spectrum bsdf_sheen_eval(const ccl_private ShaderClosure *sc,
 
 ccl_device int bsdf_sheen_sample(const ccl_private ShaderClosure *sc,
                                  const float3 Ng,
-                                 const float3 wi,
+                                 const float3 /*wi*/,
                                  const float2 rand,
                                  ccl_private Spectrum *eval,
                                  ccl_private float3 *wo,

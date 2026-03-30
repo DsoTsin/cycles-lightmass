@@ -100,6 +100,10 @@ class DebugFlags {
 
     /* Whether async PSO creation is enabled or not. */
     bool use_async_pso_creation = true;
+
+    /* Whether to use per-component motion interpolation.
+     */
+    bool use_metalrt_pcmi = true;
   };
 
   /* Get instance of debug flags registry. */

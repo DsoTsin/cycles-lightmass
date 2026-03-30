@@ -22,7 +22,7 @@ void DebugFlags::CPU::reset()
   do { \
     flag = (getenv(env) == nullptr); \
     if (!flag) { \
-      VLOG_INFO << "Disabling " << STRINGIFY(flag) << " instruction set."; \
+      LOG_INFO << "Disabling " << STRINGIFY(flag) << " instruction set."; \
     } \
   } while (0)
 
@@ -69,16 +69,20 @@ void DebugFlags::Metal::reset()
     adaptive_compile = true;
   }
 
-  if (auto *str = getenv("CYCLES_METAL_LOCAL_ATOMIC_SORT")) {
+  if (const char *str = getenv("CYCLES_METAL_LOCAL_ATOMIC_SORT")) {
     use_local_atomic_sort = (atoi(str) != 0);
   }
 
-  if (auto *str = getenv("CYCLES_METAL_NANOVDB")) {
+  if (const char *str = getenv("CYCLES_METAL_NANOVDB")) {
     use_nanovdb = (atoi(str) != 0);
   }
 
-  if (auto *str = getenv("CYCLES_METAL_ASYNC_PSO_CREATION")) {
+  if (const char *str = getenv("CYCLES_METAL_ASYNC_PSO_CREATION")) {
     use_async_pso_creation = (atoi(str) != 0);
+  }
+
+  if (const char *str = getenv("CYCLES_METALRT_PCMI")) {
+    use_metalrt_pcmi = (atoi(str) != 0);
   }
 }
 

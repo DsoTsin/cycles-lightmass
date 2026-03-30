@@ -37,10 +37,10 @@ ccl_device_inline float film_get_scale(const ccl_global KernelFilmConvert *ccl_r
   if (kfilm_convert->pass_use_filter) {
     const uint sample_count = *(
         (const ccl_global uint *)(buffer + kfilm_convert->pass_sample_count));
-    return 1.0f / sample_count;
+    return kfilm_convert->scale / sample_count;
   }
 
-  return 1.0f;
+  return kfilm_convert->scale;
 }
 
 ccl_device_inline float film_get_scale_exposure(const ccl_global KernelFilmConvert *ccl_restrict
@@ -81,10 +81,10 @@ ccl_device_inline bool film_get_scale_and_scale_exposure(
   }
 
   if (kfilm_convert->pass_use_filter) {
-    *scale = 1.0f / sample_count;
+    *scale = kfilm_convert->scale / sample_count;
   }
   else {
-    *scale = 1.0f;
+    *scale = kfilm_convert->scale;
   }
 
   if (kfilm_convert->pass_use_exposure) {
@@ -152,6 +152,39 @@ ccl_device_inline void film_get_pass_pixel_sample_count(
   const float f = *in;
 
   pixel[0] = __float_as_uint(f) * kfilm_convert->scale;
+}
+
+ccl_device_inline void film_get_pass_pixel_volume_majorant(
+    const ccl_global KernelFilmConvert *ccl_restrict kfilm_convert,
+    const ccl_global float *ccl_restrict buffer,
+    ccl_private float *ccl_restrict pixel)
+{
+  kernel_assert(kfilm_convert->num_components >= 1);
+  kernel_assert(kfilm_convert->pass_offset != PASS_UNUSED);
+
+  const float scale_exposure = film_get_scale_exposure(kfilm_convert, buffer);
+
+  const ccl_global float *in = buffer + kfilm_convert->pass_offset;
+  const ccl_global float *count = buffer + kfilm_convert->pass_divide;
+  const float f = *in;
+
+  pixel[0] = (*count != 0.0f) ? expf(-(f * scale_exposure) / *count) : 0.0f;
+}
+
+ccl_device_inline void film_get_pass_pixel_rgbe(const ccl_global KernelFilmConvert *ccl_restrict
+                                                    kfilm_convert,
+                                                const ccl_global float *ccl_restrict buffer,
+                                                ccl_private float *ccl_restrict pixel)
+{
+  kernel_assert(kfilm_convert->num_components >= 1);
+  kernel_assert(kfilm_convert->pass_offset != PASS_UNUSED);
+
+  const ccl_global float *in = buffer + kfilm_convert->pass_offset;
+  const float3 f = rgbe_to_rgb(RGBE(*in));
+
+  pixel[0] = f.x;
+  pixel[1] = f.y;
+  pixel[2] = f.z;
 }
 
 ccl_device_inline void film_get_pass_pixel_float(const ccl_global KernelFilmConvert *ccl_restrict

@@ -197,6 +197,26 @@ ccl_device void film_write_adaptive_buffer(KernelGlobals kg,
   }
 }
 
+/* Write the volume and surface contribution for volume scattering probability guiding. */
+ccl_device_inline void film_write_volume_scattering_guiding_pass(KernelGlobals kg,
+                                                                 ccl_global float *ccl_restrict
+                                                                     buffer,
+                                                                 const uint32_t path_flag,
+                                                                 const Spectrum contribution)
+{
+  int pass_offset = PASS_UNUSED;
+  if (path_flag & PATH_RAY_VOLUME_PRIMARY_TRANSMIT) {
+    pass_offset = kernel_data.film.pass_volume_transmit;
+  }
+  else if (path_flag & PATH_RAY_VOLUME_SCATTER) {
+    pass_offset = kernel_data.film.pass_volume_scatter;
+  }
+
+  if (pass_offset != PASS_UNUSED) {
+    film_write_pass_spectrum(buffer + pass_offset, contribution);
+  }
+}
+
 /* --------------------------------------------------------------------
  * Shadow catcher.
  */
@@ -337,6 +357,7 @@ ccl_device_inline void film_write_combined_pass(KernelGlobals kg,
   }
 
   film_write_adaptive_buffer(kg, sample, contribution, buffer);
+  film_write_volume_scattering_guiding_pass(kg, buffer, path_flag, contribution);
 }
 
 /* Write combined pass with transparency. */
@@ -361,6 +382,7 @@ ccl_device_inline void film_write_combined_transparent_pass(KernelGlobals kg,
   }
 
   film_write_adaptive_buffer(kg, sample, contribution, buffer);
+  film_write_volume_scattering_guiding_pass(kg, buffer, path_flag, contribution);
 }
 
 /* Write background or emission to appropriate pass. */
@@ -564,7 +586,6 @@ ccl_device_inline void film_write_direct_light(KernelGlobals kg,
  * Otherwise we'd have to write alpha on path termination, which happens
  * in many places. */
 ccl_device_inline void film_write_transparent(KernelGlobals kg,
-                                              ConstIntegratorState state,
                                               const uint32_t path_flag,
                                               const float transparent,
                                               ccl_global float *ccl_restrict buffer)
@@ -576,6 +597,12 @@ ccl_device_inline void film_write_transparent(KernelGlobals kg,
 #ifdef __SHADOW_CATCHER__
   film_write_shadow_catcher_transparent_only(kg, path_flag, transparent, buffer);
 #endif
+
+  if (path_flag & PATH_RAY_VOLUME_PRIMARY_TRANSMIT) {
+    kernel_assert(kernel_data.film.pass_volume_transmit != PASS_UNUSED);
+    film_write_pass_spectrum(buffer + kernel_data.film.pass_volume_transmit,
+                             make_spectrum(transparent));
+  }
 }
 
 /* Write holdout to render buffer. */
@@ -586,7 +613,7 @@ ccl_device_inline void film_write_holdout(KernelGlobals kg,
                                           ccl_global float *ccl_restrict render_buffer)
 {
   ccl_global float *buffer = film_pass_pixel_render_buffer(kg, state, render_buffer);
-  film_write_transparent(kg, state, path_flag, transparent, buffer);
+  film_write_transparent(kg, path_flag, transparent, buffer);
 }
 
 /* Write background contribution to render buffer.
@@ -606,7 +633,7 @@ ccl_device_inline void film_write_background(KernelGlobals kg,
   const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
 
   if (is_transparent_background_ray) {
-    film_write_transparent(kg, state, path_flag, transparent, buffer);
+    film_write_transparent(kg, path_flag, transparent, buffer);
   }
   else {
     const int sample = INTEGRATOR_STATE(state, path, sample);

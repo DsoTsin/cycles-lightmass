@@ -67,7 +67,7 @@ struct MikkMeshWrapper {
   {
     /* TODO: Check whether introducing a template boolean in order to
      * turn this into a constexpr is worth it. */
-    if (uv != nullptr) {
+    if (has_uv()) {
       const int corner_index = CornerIndex(face_num, vert_num);
       const float2 tfuv = uv[corner_index];
       return mikk::float3(tfuv.x, tfuv.y, 1.0f);
@@ -101,6 +101,11 @@ struct MikkMeshWrapper {
     }
   }
 
+  bool has_uv() const
+  {
+    return uv != nullptr;
+  }
+
   const Mesh *mesh;
 
   const float3 *normal;
@@ -110,7 +115,13 @@ struct MikkMeshWrapper {
   float *tangent_sign;
 };
 
-static void mikk_compute_tangents(Attribute *attr_uv, Mesh *mesh, const bool need_sign)
+static void mikk_compute_tangents(Attribute *attr_uv,
+                                  Mesh *mesh,
+                                  const bool need_sign,
+                                  const AttributeStandard tangent_std,
+                                  const AttributeStandard tangent_sign_std,
+                                  const char *tangent_postfix,
+                                  const char *tangent_sign_postfix)
 {
   /* Create tangent attributes. */
   AttributeSet &attributes = mesh->attributes;
@@ -124,11 +135,11 @@ static void mikk_compute_tangents(Attribute *attr_uv, Mesh *mesh, const bool nee
   const float3 *normal = attr_vN->data_float3();
   const float2 *uv = (attr_uv) ? attr_uv->data_float2() : nullptr;
 
-  const ustring name = ustring((attr_uv) ? attr_uv->name.string() + ".tangent" :
-                                           Attribute::standard_name(ATTR_STD_UV_TANGENT));
+  const ustring name = ustring((attr_uv) ? attr_uv->name.string() + tangent_postfix :
+                                           Attribute::standard_name(tangent_std));
   Attribute *attr;
   if (attr_uv == nullptr || attr_uv->std == ATTR_STD_UV) {
-    attr = attributes.add(ATTR_STD_UV_TANGENT, name);
+    attr = attributes.add(tangent_std, name);
   }
   else {
     attr = attributes.add(name, TypeVector, ATTR_ELEMENT_CORNER);
@@ -137,12 +148,11 @@ static void mikk_compute_tangents(Attribute *attr_uv, Mesh *mesh, const bool nee
   /* Create bitangent sign attribute. */
   float *tangent_sign = nullptr;
   if (need_sign) {
-    const ustring name_sign = ustring((attr_uv) ?
-                                          attr_uv->name.string() + ".tangent_sign" :
-                                          Attribute::standard_name(ATTR_STD_UV_TANGENT_SIGN));
+    const ustring name_sign = ustring((attr_uv) ? attr_uv->name.string() + tangent_sign_postfix :
+                                                  Attribute::standard_name(tangent_sign_std));
     Attribute *attr_sign;
     if (attr_uv == nullptr || attr_uv->std == ATTR_STD_UV) {
-      attr_sign = attributes.add(ATTR_STD_UV_TANGENT_SIGN, name_sign);
+      attr_sign = attributes.add(tangent_sign_std, name_sign);
     }
     else {
       attr_sign = attributes.add(name_sign, TypeFloat, ATTR_ELEMENT_CORNER);
@@ -295,6 +305,14 @@ NODE_DEFINE(Mesh)
   SOCKET_INT_ARRAY(subd_ptex_offset, "Subdivision Face PTex Offset", array<int>());
 
   /* Subdivisions parameters */
+  static NodeEnum subd_adaptive_space_enum;
+  subd_adaptive_space_enum.insert("pixel", SUBDIVISION_ADAPTIVE_SPACE_PIXEL);
+  subd_adaptive_space_enum.insert("object", SUBDIVISION_ADAPTIVE_SPACE_OBJECT);
+
+  SOCKET_ENUM(subd_adaptive_space,
+              "Subdivision Adaptive Space",
+              subd_adaptive_space_enum,
+              SUBDIVISION_ADAPTIVE_SPACE_PIXEL);
   SOCKET_FLOAT(subd_dicing_rate, "Subdivision Dicing Rate", 1.0f)
   SOCKET_INT(subd_max_level, "Max Subdivision Level", 1);
   SOCKET_TRANSFORM(subd_objecttoworld, "Subdivision Object Transform", transform_identity());
@@ -306,7 +324,8 @@ bool Mesh::need_tesselation()
 {
   return (subdivision_type != SUBDIVISION_NONE) &&
          (verts_is_modified() || subd_dicing_rate_is_modified() ||
-          subd_objecttoworld_is_modified() || subd_max_level_is_modified());
+          subd_adaptive_space_is_modified() || subd_objecttoworld_is_modified() ||
+          subd_max_level_is_modified());
 }
 
 Mesh::Mesh(const NodeType *node_type, Type geom_type_)
@@ -618,6 +637,18 @@ void Mesh::apply_transform(const Transform &tfm, const bool apply_to_motion)
         vert_steps[i] = transform_point(&tfm, vert_steps[i]);
       }
     }
+
+    Attribute *attr_N = attributes.find(ATTR_STD_MOTION_VERTEX_NORMAL);
+
+    if (attr_N) {
+      const Transform ntfm = transform_normal;
+      const size_t steps_size = verts.size() * (motion_steps - 1);
+      float3 *normal_steps = attr_N->data_float3();
+
+      for (size_t i = 0; i < steps_size; i++) {
+        normal_steps[i] = normalize(transform_direction(&ntfm, normal_steps[i]));
+      }
+    }
   }
 }
 
@@ -725,25 +756,29 @@ void Mesh::add_vertex_normals()
   }
 }
 
-void Mesh::add_undisplaced()
+void Mesh::add_undisplaced(Scene *scene)
 {
-  AttributeSet &attrs = (subdivision_type == SUBDIVISION_NONE) ? attributes : subd_attributes;
+  if (need_attribute(scene, ATTR_STD_POSITION_UNDISPLACED) &&
+      !attributes.find(ATTR_STD_POSITION_UNDISPLACED))
+  {
+    /* Copy position to attribute. */
+    Attribute *attr = attributes.add(ATTR_STD_POSITION_UNDISPLACED);
 
-  /* don't compute if already there */
-  if (attrs.find(ATTR_STD_POSITION_UNDISPLACED)) {
-    return;
+    size_t size = attr->buffer_size(this, ATTR_PRIM_GEOMETRY) / sizeof(float3);
+    std::copy_n(verts.data(), size, attr->data_float3());
   }
 
-  /* get attribute */
-  Attribute *attr = attrs.add(ATTR_STD_POSITION_UNDISPLACED);
+  if (need_attribute(scene, ATTR_STD_NORMAL_UNDISPLACED) &&
+      !attributes.find(ATTR_STD_NORMAL_UNDISPLACED))
+  {
+    /* Copy vertex normal to attribute */
+    Attribute *attr_N = attributes.find(ATTR_STD_VERTEX_NORMAL);
+    if (attr_N) {
+      Attribute *attr = attributes.add(ATTR_STD_NORMAL_UNDISPLACED);
 
-  float3 *data = attr->data_float3();
-
-  /* copy verts */
-  size_t size = attr->buffer_size(this, ATTR_PRIM_GEOMETRY) / sizeof(float3);
-
-  if (size) {
-    std::copy_n(verts.data(), size, data);
+      size_t size = attr->buffer_size(this, ATTR_PRIM_GEOMETRY) / sizeof(float3);
+      std::copy_n(attr_N->data_float3(), size, attr->data_float3());
+    }
   }
 }
 
@@ -770,7 +805,7 @@ void Mesh::update_generated(Scene *scene)
   }
 }
 
-void Mesh::update_tangents(Scene *scene)
+void Mesh::update_tangents(Scene *scene, bool undisplaced)
 {
   if (!num_triangles()) {
     return;
@@ -782,9 +817,24 @@ void Mesh::update_tangents(Scene *scene)
   ccl::set<ustring> uv_maps;
   Attribute *attr_std_uv = attributes.find(ATTR_STD_UV);
 
+  AttributeStandard tangent_std = (undisplaced) ? ATTR_STD_UV_TANGENT_UNDISPLACED :
+                                                  ATTR_STD_UV_TANGENT;
+  AttributeStandard tangent_sign_std = (undisplaced) ? ATTR_STD_UV_TANGENT_SIGN_UNDISPLACED :
+                                                       ATTR_STD_UV_TANGENT_SIGN;
+  const char *tangent_postfix = (undisplaced) ? ".undisplaced_tangent" : ".tangent";
+  const char *tangent_sign_postfix = (undisplaced) ? ".undisplaced_tangent_sign" : ".tangent_sign";
+
   /* Standard UVs. */
-  if (need_attribute(scene, ATTR_STD_UV_TANGENT) && !attributes.find(ATTR_STD_UV_TANGENT)) {
-    mikk_compute_tangents(attr_std_uv, this, true); /* sign */
+  if ((need_attribute(scene, tangent_std) || need_attribute(scene, tangent_sign_std)) &&
+      !attributes.find(tangent_std))
+  {
+    mikk_compute_tangents(attr_std_uv,
+                          this,
+                          true,
+                          tangent_std,
+                          tangent_sign_std,
+                          tangent_postfix,
+                          tangent_sign_postfix); /* sign */
   }
 
   /* Other UV attributes. */
@@ -793,10 +843,19 @@ void Mesh::update_tangents(Scene *scene)
       continue;
     }
 
-    const ustring tangent_name = ustring(attr.name.string() + ".tangent");
+    const ustring tangent_name = ustring(attr.name.string() + tangent_postfix);
+    const ustring tangent_sign_name = ustring(attr.name.string() + tangent_sign_postfix);
 
-    if (need_attribute(scene, tangent_name) && !attributes.find(tangent_name)) {
-      mikk_compute_tangents(&attr, this, true); /* sign */
+    if ((need_attribute(scene, tangent_name) || need_attribute(scene, tangent_sign_name)) &&
+        !attributes.find(tangent_name))
+    {
+      mikk_compute_tangents(&attr,
+                            this,
+                            true,
+                            tangent_std,
+                            tangent_sign_std,
+                            tangent_postfix,
+                            tangent_sign_postfix); /* sign */
     }
   }
 }

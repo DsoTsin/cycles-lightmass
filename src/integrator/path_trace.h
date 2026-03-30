@@ -107,7 +107,7 @@ class PathTrace {
   void set_display_driver(unique_ptr<DisplayDriver> driver);
 
   /* Clear the display buffer by filling it in with all zeroes. */
-  void clear_display();
+  void zero_display();
 
   /* Perform drawing of the current state of the DisplayDriver. */
   void draw();
@@ -210,6 +210,7 @@ class PathTrace {
   void path_trace(RenderWork &render_work);
   void adaptive_sample(RenderWork &render_work);
   void denoise(const RenderWork &render_work);
+  void denoise_volume_guiding_buffers(const RenderWork &render_work, const bool has_volume);
   void cryptomatte_postprocess(const RenderWork &render_work);
   void update_display(const RenderWork &render_work);
   void rebalance(const RenderWork &render_work);
@@ -289,7 +290,7 @@ class PathTrace {
   /* Denoiser device descriptor which holds the denoised big tile for multi-device workloads. */
   unique_ptr<PathTraceWork> big_tile_denoise_work_;
 
-#ifdef WITH_PATH_GUIDING
+#if defined(WITH_PATH_GUIDING)
   /* Guiding related attributes */
   GuidingParams guiding_params_;
 

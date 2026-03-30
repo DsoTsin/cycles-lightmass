@@ -41,6 +41,7 @@ class Integrator : public Node {
   NODE_SOCKET_API(float, ao_distance)
   NODE_SOCKET_API(float, ao_additive_factor)
 
+  NODE_SOCKET_API(bool, volume_ray_marching)
   NODE_SOCKET_API(int, volume_max_steps)
   NODE_SOCKET_API(float, volume_step_rate)
 

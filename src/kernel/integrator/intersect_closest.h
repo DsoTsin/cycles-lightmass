@@ -119,11 +119,18 @@ ccl_device_forceinline void integrator_split_shadow_catcher(
    * non-catcher objects. */
   INTEGRATOR_STATE_WRITE(state, path, flag) |= PATH_RAY_SHADOW_CATCHER_PASS;
 
+  /* Shadow catcher path does not use guiding.
+   * Clear the path_segment to ensure we do not reference possibly stale data from the main path.
+   */
+#  ifdef __PATH_GUIDING__
+  INTEGRATOR_STATE_WRITE(state, guiding, path_segment) = nullptr;
+#  endif
+
   if (kernel_data.film.pass_background != PASS_UNUSED && !kernel_data.background.transparent) {
     /* If using background pass, schedule background shading kernel so that we have a background
      * to alpha-over on. The background kernel will then continue the path afterwards. */
     INTEGRATOR_STATE_WRITE(state, path, flag) |= PATH_RAY_SHADOW_CATCHER_BACKGROUND;
-    integrator_path_init(kg, state, DEVICE_KERNEL_INTEGRATOR_SHADE_BACKGROUND);
+    integrator_path_init(state, DEVICE_KERNEL_INTEGRATOR_SHADE_BACKGROUND);
     return;
   }
 
@@ -131,7 +138,7 @@ ccl_device_forceinline void integrator_split_shadow_catcher(
   if (!integrator_state_volume_stack_is_empty(kg, state)) {
     /* Volume stack is not empty. Re-init the volume stack to exclude any non-shadow catcher
      * objects from it, and then continue shading volume and shadow catcher surface after. */
-    integrator_path_init(kg, state, DEVICE_KERNEL_INTEGRATOR_INTERSECT_VOLUME_STACK);
+    integrator_path_init(state, DEVICE_KERNEL_INTEGRATOR_INTERSECT_VOLUME_STACK);
     return;
   }
 #  endif
@@ -196,8 +203,7 @@ ccl_device_forceinline void integrator_intersect_next_kernel_after_shadow_catche
   if (!integrator_state_volume_stack_is_empty(kg, state)) {
     /* Volume stack is not empty. Re-init the volume stack to exclude any non-shadow catcher
      * objects from it, and then continue shading volume and shadow catcher surface after. */
-    integrator_path_next(
-        kg, state, current_kernel, DEVICE_KERNEL_INTEGRATOR_INTERSECT_VOLUME_STACK);
+    integrator_path_next(state, current_kernel, DEVICE_KERNEL_INTEGRATOR_INTERSECT_VOLUME_STACK);
     return;
   }
 #  endif
@@ -227,10 +233,16 @@ ccl_device_forceinline void integrator_intersect_next_kernel(
     const int flags = (hit_surface) ? kernel_data_fetch(shaders, shader).flags : 0;
 
     if (!integrator_intersect_terminate(kg, state, flags)) {
-      integrator_path_next(kg, state, current_kernel, DEVICE_KERNEL_INTEGRATOR_SHADE_VOLUME);
+      if (kernel_data.integrator.volume_ray_marching) {
+        integrator_path_next(
+            state, current_kernel, DEVICE_KERNEL_INTEGRATOR_SHADE_VOLUME_RAY_MARCHING);
+      }
+      else {
+        integrator_path_next(state, current_kernel, DEVICE_KERNEL_INTEGRATOR_SHADE_VOLUME);
+      }
     }
     else {
-      integrator_path_terminate(kg, state, current_kernel);
+      integrator_path_terminate(kg, state, render_buffer, current_kernel);
     }
     return;
   }
@@ -239,7 +251,7 @@ ccl_device_forceinline void integrator_intersect_next_kernel(
   if (hit) {
     /* Hit a surface, continue with light or surface kernel. */
     if (isect->type & PRIMITIVE_LAMP) {
-      integrator_path_next(kg, state, current_kernel, DEVICE_KERNEL_INTEGRATOR_SHADE_LIGHT);
+      integrator_path_next(state, current_kernel, DEVICE_KERNEL_INTEGRATOR_SHADE_LIGHT);
     }
     else {
       /* Hit a surface, continue with surface kernel unless terminated. */
@@ -270,17 +282,17 @@ ccl_device_forceinline void integrator_intersect_next_kernel(
 #endif
       }
       else {
-        integrator_path_terminate(kg, state, current_kernel);
+        integrator_path_terminate(kg, state, render_buffer, current_kernel);
       }
     }
   }
   else {
     /* Nothing hit, continue with background kernel. */
     if (integrator_intersect_skip_lights(kg, state)) {
-      integrator_path_terminate(kg, state, current_kernel);
+      integrator_path_terminate(kg, state, render_buffer, current_kernel);
     }
     else {
-      integrator_path_next(kg, state, current_kernel, DEVICE_KERNEL_INTEGRATOR_SHADE_BACKGROUND);
+      integrator_path_next(state, current_kernel, DEVICE_KERNEL_INTEGRATOR_SHADE_BACKGROUND);
     }
   }
 }
@@ -299,7 +311,7 @@ ccl_device_forceinline void integrator_intersect_next_kernel_after_volume(
   if (isect->prim != PRIM_NONE) {
     /* Hit a surface, continue with light or surface kernel. */
     if (isect->type & PRIMITIVE_LAMP) {
-      integrator_path_next(kg, state, current_kernel, DEVICE_KERNEL_INTEGRATOR_SHADE_LIGHT);
+      integrator_path_next(state, current_kernel, DEVICE_KERNEL_INTEGRATOR_SHADE_LIGHT);
       return;
     }
 
@@ -332,10 +344,10 @@ ccl_device_forceinline void integrator_intersect_next_kernel_after_volume(
   }
   /* Nothing hit, continue with background kernel. */
   if (integrator_intersect_skip_lights(kg, state)) {
-    integrator_path_terminate(kg, state, current_kernel);
+    integrator_path_terminate(kg, state, render_buffer, current_kernel);
   }
   else {
-    integrator_path_next(kg, state, current_kernel, DEVICE_KERNEL_INTEGRATOR_SHADE_BACKGROUND);
+    integrator_path_next(state, current_kernel, DEVICE_KERNEL_INTEGRATOR_SHADE_BACKGROUND);
   }
 }
 

@@ -4,21 +4,30 @@
 
 #include "scene/volume.h"
 #include "scene/attribute.h"
+#include "scene/background.h"
 #include "scene/image_vdb.h"
+#include "scene/integrator.h"
+#include "scene/light.h"
+#include "scene/object.h"
 #include "scene/scene.h"
 
 #ifdef WITH_OPENVDB
-#  include <openvdb/tools/Dense.h>
 #  include <openvdb/tools/GridTransformer.h>
+#  include <openvdb/tools/LevelSetUtil.h>
 #  include <openvdb/tools/Morphology.h>
-#  include <openvdb/tools/Statistics.h>
 #endif
 
 #include "util/hash.h"
 #include "util/log.h"
-#include "util/openvdb.h"
+#include "util/nanovdb.h"
+#include "util/path.h"
 #include "util/progress.h"
+#include "util/texture.h"
 #include "util/types.h"
+
+#include "bvh/octree.h"
+
+#include <OpenImageIO/filesystem.h>
 
 CCL_NAMESPACE_BEGIN
 
@@ -26,7 +35,6 @@ NODE_DEFINE(Volume)
 {
   NodeType *type = NodeType::add("volume", create, NodeType::NONE, Mesh::get_node_type());
 
-  SOCKET_FLOAT(clipping, "Clipping", 0.001f);
   SOCKET_FLOAT(step_size, "Step Size", 0.0f);
   SOCKET_BOOLEAN(object_space, "Object Space", false);
   SOCKET_FLOAT(velocity_scale, "Velocity Scale", 1.0f);
@@ -36,7 +44,6 @@ NODE_DEFINE(Volume)
 
 Volume::Volume() : Mesh(get_node_type(), Geometry::VOLUME)
 {
-  clipping = 0.001f;
   step_size = 0.0f;
   object_space = false;
 }
@@ -61,7 +68,7 @@ enum {
   QUAD_Z_MAX = 5,
 };
 
-#ifdef WITH_OPENVDB
+#if defined(WITH_OPENVDB) && defined(WITH_NANOVDB)
 const int quads_indices[6][4] = {
     /* QUAD_X_MIN */
     {4, 0, 3, 7},
@@ -127,7 +134,6 @@ static void create_quad(const int3 corners[8],
 
   quads.push_back(quad);
 }
-#endif
 
 /* Create a mesh from a volume.
  *
@@ -136,31 +142,29 @@ static void create_quad(const int3 corners[8],
  * - The topologies of input OpenVDB grids are merged into a temporary grid.
  * - Voxels of the temporary grid are dilated to account for the padding necessary for volume
  * sampling.
- * - Quads are created on the boundary between active and inactive leaf nodes of the temporary
- * grid.
+ * - A bounding box of the temporary grid is created.
  */
 class VolumeMeshBuilder {
  public:
-#ifdef WITH_OPENVDB
   /* use a MaskGrid to store the topology to save memory */
   openvdb::MaskGrid::Ptr topology_grid;
   openvdb::CoordBBox bbox;
-#endif
   bool first_grid;
 
   VolumeMeshBuilder();
 
-#ifdef WITH_OPENVDB
-  void add_grid(openvdb::GridBase::ConstPtr grid, bool do_clipping, const float volume_clipping);
-#endif
+  void add_grid(const nanovdb::GridHandle<> &grid);
 
   void add_padding(const int pad_size);
 
   void create_mesh(vector<float3> &vertices,
                    vector<int> &indices,
-                   const float face_overlap_avoidance);
+                   const float face_overlap_avoidance,
+                   const bool ray_marching);
 
-  void generate_vertices_and_quads(vector<int3> &vertices_is, vector<QuadData> &quads);
+  void generate_vertices_and_quads(vector<int3> &vertices_is,
+                                   vector<QuadData> &quads,
+                                   const bool ray_marching);
 
   void convert_object_space(const vector<int3> &vertices,
                             vector<float3> &out_vertices,
@@ -169,30 +173,6 @@ class VolumeMeshBuilder {
   void convert_quads_to_tris(const vector<QuadData> &quads, vector<int> &tris);
 
   bool empty_grid() const;
-
-#ifdef WITH_OPENVDB
-  template<typename GridType>
-  void merge_grid(openvdb::GridBase::ConstPtr grid, bool do_clipping, const float volume_clipping)
-  {
-    typename GridType::ConstPtr typed_grid = openvdb::gridConstPtrCast<GridType>(grid);
-
-    if (do_clipping) {
-      using ValueType = typename GridType::ValueType;
-      const typename GridType::Ptr copy = typed_grid->deepCopy();
-      typename GridType::ValueOnIter iter = copy->beginValueOn();
-
-      for (; iter; ++iter) {
-        if (openvdb::math::Abs(iter.getValue()) < ValueType(volume_clipping)) {
-          iter.setValueOff();
-        }
-      }
-
-      typed_grid = copy;
-    }
-
-    topology_grid->topologyUnion(*typed_grid);
-  }
-#endif
 };
 
 VolumeMeshBuilder::VolumeMeshBuilder()
@@ -200,21 +180,21 @@ VolumeMeshBuilder::VolumeMeshBuilder()
   first_grid = true;
 }
 
-#ifdef WITH_OPENVDB
-void VolumeMeshBuilder::add_grid(openvdb::GridBase::ConstPtr grid,
-                                 bool do_clipping,
-                                 const float volume_clipping)
+void VolumeMeshBuilder::add_grid(const nanovdb::GridHandle<> &nanogrid)
 {
   /* set the transform of our grid from the first one */
+  openvdb::MaskGrid::Ptr grid = nanovdb_to_openvdb_mask(nanogrid);
+
   if (first_grid) {
-    topology_grid = openvdb::MaskGrid::create();
-    topology_grid->setTransform(grid->transform().copy());
+    topology_grid = grid;
     first_grid = false;
+    return;
   }
-  /* if the transforms do not match, we need to resample one of the grids so that
+
+  /* If the transforms do not match, we need to resample one of the grids so that
    * its index space registers with that of the other, here we resample our mask
    * grid so memory usage is kept low */
-  else if (topology_grid->transform() != grid->transform()) {
+  if (topology_grid->transform() != grid->transform()) {
     const openvdb::MaskGrid::Ptr temp_grid = topology_grid->copyWithNewTree();
     temp_grid->setTransform(grid->transform().copy());
     openvdb::tools::resampleToMatch<openvdb::tools::BoxSampler>(*topology_grid, *temp_grid);
@@ -222,163 +202,144 @@ void VolumeMeshBuilder::add_grid(openvdb::GridBase::ConstPtr grid,
     topology_grid->setTransform(grid->transform().copy());
   }
 
-  if (grid->isType<openvdb::FloatGrid>()) {
-    merge_grid<openvdb::FloatGrid>(grid, do_clipping, volume_clipping);
-  }
-  else if (grid->isType<openvdb::Vec3fGrid>()) {
-    merge_grid<openvdb::Vec3fGrid>(grid, do_clipping, volume_clipping);
-  }
-  else if (grid->isType<openvdb::Vec4fGrid>()) {
-    merge_grid<openvdb::Vec4fGrid>(grid, do_clipping, volume_clipping);
-  }
-  else if (grid->isType<openvdb::BoolGrid>()) {
-    merge_grid<openvdb::BoolGrid>(grid, do_clipping, volume_clipping);
-  }
-  else if (grid->isType<openvdb::DoubleGrid>()) {
-    merge_grid<openvdb::DoubleGrid>(grid, do_clipping, volume_clipping);
-  }
-  else if (grid->isType<openvdb::Int32Grid>()) {
-    merge_grid<openvdb::Int32Grid>(grid, do_clipping, volume_clipping);
-  }
-  else if (grid->isType<openvdb::Int64Grid>()) {
-    merge_grid<openvdb::Int64Grid>(grid, do_clipping, volume_clipping);
-  }
-  else if (grid->isType<openvdb::Vec3IGrid>()) {
-    merge_grid<openvdb::Vec3IGrid>(grid, do_clipping, volume_clipping);
-  }
-  else if (grid->isType<openvdb::Vec3dGrid>()) {
-    merge_grid<openvdb::Vec3dGrid>(grid, do_clipping, volume_clipping);
-  }
-  else if (grid->isType<openvdb::MaskGrid>()) {
-    topology_grid->topologyUnion(*openvdb::gridConstPtrCast<openvdb::MaskGrid>(grid));
-  }
+  topology_grid->topologyUnion(*grid);
 }
-#endif
 
 void VolumeMeshBuilder::add_padding(const int pad_size)
 {
-#ifdef WITH_OPENVDB
   openvdb::tools::dilateActiveValues(
       topology_grid->tree(), pad_size, openvdb::tools::NN_FACE, openvdb::tools::IGNORE_TILES);
-#else
-  (void)pad_size;
-#endif
 }
 
 void VolumeMeshBuilder::create_mesh(vector<float3> &vertices,
                                     vector<int> &indices,
-                                    const float face_overlap_avoidance)
+                                    const float face_overlap_avoidance,
+                                    const bool ray_marching)
 {
-#ifdef WITH_OPENVDB
   /* We create vertices in index space (is), and only convert them to object
    * space when done. */
   vector<int3> vertices_is;
   vector<QuadData> quads;
 
-  /* make sure we only have leaf nodes in the tree, as tiles are not handled by
-   * this algorithm */
-  topology_grid->tree().voxelizeActiveTiles();
-
-  generate_vertices_and_quads(vertices_is, quads);
+  generate_vertices_and_quads(vertices_is, quads, ray_marching);
 
   convert_object_space(vertices_is, vertices, face_overlap_avoidance);
 
   convert_quads_to_tris(quads, indices);
-#else
-  (void)vertices;
-  (void)indices;
-  (void)face_overlap_avoidance;
-#endif
 }
 
-#ifdef WITH_OPENVDB
 static bool is_non_empty_leaf(const openvdb::MaskGrid::TreeType &tree, const openvdb::Coord coord)
 {
   const auto *leaf_node = tree.probeLeaf(coord);
   return (leaf_node && !leaf_node->isEmpty());
 }
-#endif
 
 void VolumeMeshBuilder::generate_vertices_and_quads(vector<ccl::int3> &vertices_is,
-                                                    vector<QuadData> &quads)
+                                                    vector<QuadData> &quads,
+                                                    const bool ray_marching)
 {
-#ifdef WITH_OPENVDB
-  const openvdb::MaskGrid::TreeType &tree = topology_grid->tree();
-  tree.evalLeafBoundingBox(bbox);
+  if (ray_marching) {
+    /* Make sure we only have leaf nodes in the tree, as tiles are not handled by this algorithm */
+    topology_grid->tree().voxelizeActiveTiles();
+
+    const openvdb::MaskGrid::TreeType &tree = topology_grid->tree();
+    tree.evalLeafBoundingBox(bbox);
+
+    const int3 resolution = make_int3(bbox.dim().x(), bbox.dim().y(), bbox.dim().z());
+
+    unordered_map<size_t, int> used_verts;
+    for (auto iter = tree.cbeginLeaf(); iter; ++iter) {
+      if (iter->isEmpty()) {
+        continue;
+      }
+      openvdb::CoordBBox leaf_bbox = iter->getNodeBoundingBox();
+      /* +1 to convert from exclusive to include bounds. */
+      leaf_bbox.max() = leaf_bbox.max().offsetBy(1);
+      int3 min = make_int3(leaf_bbox.min().x(), leaf_bbox.min().y(), leaf_bbox.min().z());
+      int3 max = make_int3(leaf_bbox.max().x(), leaf_bbox.max().y(), leaf_bbox.max().z());
+      int3 corners[8] = {
+          make_int3(min[0], min[1], min[2]),
+          make_int3(max[0], min[1], min[2]),
+          make_int3(max[0], max[1], min[2]),
+          make_int3(min[0], max[1], min[2]),
+          make_int3(min[0], min[1], max[2]),
+          make_int3(max[0], min[1], max[2]),
+          make_int3(max[0], max[1], max[2]),
+          make_int3(min[0], max[1], max[2]),
+      };
+      /* Only create a quad if on the border between an active and an inactive leaf.
+       *
+       * We verify that a leaf exists by probing a coordinate that is at its center,
+       * to do so we compute the center of the current leaf and offset this coordinate
+       * by the size of a leaf in each direction.
+       */
+      static const int LEAF_DIM = openvdb::MaskGrid::TreeType::LeafNodeType::DIM;
+      auto center = leaf_bbox.min() + openvdb::Coord(LEAF_DIM / 2);
+      if (!is_non_empty_leaf(tree, openvdb::Coord(center.x() - LEAF_DIM, center.y(), center.z())))
+      {
+        create_quad(corners, vertices_is, quads, resolution, used_verts, QUAD_X_MIN);
+      }
+      if (!is_non_empty_leaf(tree, openvdb::Coord(center.x() + LEAF_DIM, center.y(), center.z())))
+      {
+        create_quad(corners, vertices_is, quads, resolution, used_verts, QUAD_X_MAX);
+      }
+      if (!is_non_empty_leaf(tree, openvdb::Coord(center.x(), center.y() - LEAF_DIM, center.z())))
+      {
+        create_quad(corners, vertices_is, quads, resolution, used_verts, QUAD_Y_MIN);
+      }
+      if (!is_non_empty_leaf(tree, openvdb::Coord(center.x(), center.y() + LEAF_DIM, center.z())))
+      {
+        create_quad(corners, vertices_is, quads, resolution, used_verts, QUAD_Y_MAX);
+      }
+      if (!is_non_empty_leaf(tree, openvdb::Coord(center.x(), center.y(), center.z() - LEAF_DIM)))
+      {
+        create_quad(corners, vertices_is, quads, resolution, used_verts, QUAD_Z_MIN);
+      }
+      if (!is_non_empty_leaf(tree, openvdb::Coord(center.x(), center.y(), center.z() + LEAF_DIM)))
+      {
+        create_quad(corners, vertices_is, quads, resolution, used_verts, QUAD_Z_MAX);
+      }
+    }
+    return;
+  }
+
+  bbox = topology_grid->evalActiveVoxelBoundingBox();
 
   const int3 resolution = make_int3(bbox.dim().x(), bbox.dim().y(), bbox.dim().z());
 
+  /* +1 to convert from exclusive to include bounds. */
+  bbox.max() = bbox.max().offsetBy(1);
+
+  int3 min = make_int3(bbox.min().x(), bbox.min().y(), bbox.min().z());
+  int3 max = make_int3(bbox.max().x(), bbox.max().y(), bbox.max().z());
+
+  int3 corners[8] = {
+      make_int3(min[0], min[1], min[2]),
+      make_int3(max[0], min[1], min[2]),
+      make_int3(max[0], max[1], min[2]),
+      make_int3(min[0], max[1], min[2]),
+      make_int3(min[0], min[1], max[2]),
+      make_int3(max[0], min[1], max[2]),
+      make_int3(max[0], max[1], max[2]),
+      make_int3(min[0], max[1], max[2]),
+  };
+
+  /* Create 6 quads of the bounding box. */
   unordered_map<size_t, int> used_verts;
 
-  for (auto iter = tree.cbeginLeaf(); iter; ++iter) {
-    if (iter->isEmpty()) {
-      continue;
-    }
-
-    openvdb::CoordBBox leaf_bbox = iter->getNodeBoundingBox();
-    /* +1 to convert from exclusive to include bounds. */
-    leaf_bbox.max() = leaf_bbox.max().offsetBy(1);
-
-    int3 min = make_int3(leaf_bbox.min().x(), leaf_bbox.min().y(), leaf_bbox.min().z());
-    int3 max = make_int3(leaf_bbox.max().x(), leaf_bbox.max().y(), leaf_bbox.max().z());
-
-    int3 corners[8] = {
-        make_int3(min[0], min[1], min[2]),
-        make_int3(max[0], min[1], min[2]),
-        make_int3(max[0], max[1], min[2]),
-        make_int3(min[0], max[1], min[2]),
-        make_int3(min[0], min[1], max[2]),
-        make_int3(max[0], min[1], max[2]),
-        make_int3(max[0], max[1], max[2]),
-        make_int3(min[0], max[1], max[2]),
-    };
-
-    /* Only create a quad if on the border between an active and an inactive leaf.
-     *
-     * We verify that a leaf exists by probing a coordinate that is at its center,
-     * to do so we compute the center of the current leaf and offset this coordinate
-     * by the size of a leaf in each direction.
-     */
-    static const int LEAF_DIM = openvdb::MaskGrid::TreeType::LeafNodeType::DIM;
-    auto center = leaf_bbox.min() + openvdb::Coord(LEAF_DIM / 2);
-
-    if (!is_non_empty_leaf(tree, openvdb::Coord(center.x() - LEAF_DIM, center.y(), center.z()))) {
-      create_quad(corners, vertices_is, quads, resolution, used_verts, QUAD_X_MIN);
-    }
-
-    if (!is_non_empty_leaf(tree, openvdb::Coord(center.x() + LEAF_DIM, center.y(), center.z()))) {
-      create_quad(corners, vertices_is, quads, resolution, used_verts, QUAD_X_MAX);
-    }
-
-    if (!is_non_empty_leaf(tree, openvdb::Coord(center.x(), center.y() - LEAF_DIM, center.z()))) {
-      create_quad(corners, vertices_is, quads, resolution, used_verts, QUAD_Y_MIN);
-    }
-
-    if (!is_non_empty_leaf(tree, openvdb::Coord(center.x(), center.y() + LEAF_DIM, center.z()))) {
-      create_quad(corners, vertices_is, quads, resolution, used_verts, QUAD_Y_MAX);
-    }
-
-    if (!is_non_empty_leaf(tree, openvdb::Coord(center.x(), center.y(), center.z() - LEAF_DIM))) {
-      create_quad(corners, vertices_is, quads, resolution, used_verts, QUAD_Z_MIN);
-    }
-
-    if (!is_non_empty_leaf(tree, openvdb::Coord(center.x(), center.y(), center.z() + LEAF_DIM))) {
-      create_quad(corners, vertices_is, quads, resolution, used_verts, QUAD_Z_MAX);
-    }
-  }
-#else
-  (void)vertices_is;
-  (void)quads;
-#endif
+  create_quad(corners, vertices_is, quads, resolution, used_verts, QUAD_X_MIN);
+  create_quad(corners, vertices_is, quads, resolution, used_verts, QUAD_X_MAX);
+  create_quad(corners, vertices_is, quads, resolution, used_verts, QUAD_Y_MIN);
+  create_quad(corners, vertices_is, quads, resolution, used_verts, QUAD_Y_MAX);
+  create_quad(corners, vertices_is, quads, resolution, used_verts, QUAD_Z_MIN);
+  create_quad(corners, vertices_is, quads, resolution, used_verts, QUAD_Z_MAX);
 }
 
 void VolumeMeshBuilder::convert_object_space(const vector<int3> &vertices,
                                              vector<float3> &out_vertices,
                                              const float face_overlap_avoidance)
 {
-#ifdef WITH_OPENVDB
   /* compute the offset for the face overlap avoidance */
-  bbox = topology_grid->evalActiveVoxelBoundingBox();
   openvdb::Coord dim = bbox.dim();
 
   const float3 cell_size = make_float3(1.0f / dim.x(), 1.0f / dim.y(), 1.0f / dim.z());
@@ -392,11 +353,6 @@ void VolumeMeshBuilder::convert_object_space(const vector<int3> &vertices,
     const float3 vertex = make_float3((float)p.x(), (float)p.y(), (float)p.z());
     out_vertices.push_back(vertex + point_offset);
   }
-#else
-  (void)vertices;
-  (void)out_vertices;
-  (void)face_overlap_avoidance;
-#endif
 }
 
 void VolumeMeshBuilder::convert_quads_to_tris(const vector<QuadData> &quads, vector<int> &tris)
@@ -417,115 +373,46 @@ void VolumeMeshBuilder::convert_quads_to_tris(const vector<QuadData> &quads, vec
 
 bool VolumeMeshBuilder::empty_grid() const
 {
-#ifdef WITH_OPENVDB
   return !topology_grid ||
          (!topology_grid->tree().hasActiveTiles() && topology_grid->tree().leafCount() == 0);
-#else
-  return true;
-#endif
 }
 
-#ifdef WITH_OPENVDB
-template<typename GridType>
-static openvdb::GridBase::ConstPtr openvdb_grid_from_device_texture(device_texture *image_memory,
-                                                                    const float volume_clipping,
-                                                                    Transform transform_3d)
-{
-  using ValueType = typename GridType::ValueType;
-
-  const openvdb::CoordBBox dense_bbox(0,
-                                      0,
-                                      0,
-                                      image_memory->data_width - 1,
-                                      image_memory->data_height - 1,
-                                      image_memory->data_depth - 1);
-
-  typename GridType::Ptr sparse = GridType::create(ValueType(0.0f));
-  if (dense_bbox.empty()) {
-    return sparse;
-  }
-
-  const openvdb::tools::Dense<ValueType, openvdb::tools::MemoryLayout::LayoutXYZ> dense(
-      dense_bbox, static_cast<ValueType *>(image_memory->host_pointer));
-
-  openvdb::tools::copyFromDense(dense, *sparse, ValueType(volume_clipping));
-
-  /* #copyFromDense will remove any leaf node that contains constant data and replace it with a
-   * tile, however, we need to preserve the leaves in order to generate the mesh, so re-voxelize
-   * the leaves that were pruned. This should not affect areas that were skipped due to the
-   * volume_clipping parameter. */
-  sparse->tree().voxelizeActiveTiles();
-
-  /* Compute index to world matrix. */
-  const float3 voxel_size = make_float3(1.0f / image_memory->data_width,
-                                        1.0f / image_memory->data_height,
-                                        1.0f / image_memory->data_depth);
-
-  transform_3d = transform_inverse(transform_3d);
-
-  const openvdb::Mat4R index_to_world_mat((double)(voxel_size.x * transform_3d[0][0]),
-                                          0.0,
-                                          0.0,
-                                          0.0,
-                                          0.0,
-                                          (double)(voxel_size.y * transform_3d[1][1]),
-                                          0.0,
-                                          0.0,
-                                          0.0,
-                                          0.0,
-                                          (double)(voxel_size.z * transform_3d[2][2]),
-                                          0.0,
-                                          (double)transform_3d[0][3],
-                                          (double)transform_3d[1][3],
-                                          (double)transform_3d[2][3],
-                                          1.0);
-
-  const openvdb::math::Transform::Ptr index_to_world_tfm =
-      openvdb::math::Transform::createLinearTransform(index_to_world_mat);
-
-  sparse->setTransform(index_to_world_tfm);
-
-  return sparse;
-}
-
-static int estimate_required_velocity_padding(openvdb::GridBase::ConstPtr grid,
+static int estimate_required_velocity_padding(const nanovdb::GridHandle<> &grid,
                                               const float velocity_scale)
 {
-  /* TODO: we may need to also find outliers and clamp them to avoid adding too much padding. */
-  openvdb::math::Extrema extrema;
-  openvdb::Vec3d voxel_size;
+  const auto *typed_grid = grid.template grid<nanovdb::Vec3f>(0);
 
-  /* External `.vdb` files have a vec3 type for velocity,
-   * but the Blender exporter creates a vec4. */
-  if (grid->isType<openvdb::Vec3fGrid>()) {
-    const openvdb::Vec3fGrid::ConstPtr vel_grid = openvdb::gridConstPtrCast<openvdb::Vec3fGrid>(
-        grid);
-    extrema = openvdb::tools::extrema(vel_grid->cbeginValueOn());
-    voxel_size = vel_grid->voxelSize();
-  }
-  else if (grid->isType<openvdb::Vec4fGrid>()) {
-    const openvdb::Vec4fGrid::ConstPtr vel_grid = openvdb::gridConstPtrCast<openvdb::Vec4fGrid>(
-        grid);
-    extrema = openvdb::tools::extrema(vel_grid->cbeginValueOn());
-    voxel_size = vel_grid->voxelSize();
-  }
-  else {
-    assert(0);
+  if (typed_grid == nullptr) {
     return 0;
   }
 
+  const nanovdb::Vec3d voxel_size = typed_grid->voxelSize();
+
   /* We should only have uniform grids, so x = y = z, but we never know. */
-  const double max_voxel_size = openvdb::math::Max(voxel_size.x(), voxel_size.y(), voxel_size.z());
+  const double max_voxel_size = openvdb::math::Max(voxel_size[0], voxel_size[1], voxel_size[2]);
   if (max_voxel_size == 0.0) {
     return 0;
   }
 
-  const double estimated_padding = extrema.max() * static_cast<double>(velocity_scale) /
+  /* TODO: we may need to also find outliers and clamp them to avoid adding too much padding. */
+  const nanovdb::Vec3f mn = typed_grid->tree().root().minimum();
+  const nanovdb::Vec3f mx = typed_grid->tree().root().maximum();
+  float max_value = 0.0f;
+  max_value = max(max_value, fabsf(mx[0]));
+  max_value = max(max_value, fabsf(mx[1]));
+  max_value = max(max_value, fabsf(mx[2]));
+  max_value = max(max_value, fabsf(mn[0]));
+  max_value = max(max_value, fabsf(mn[1]));
+  max_value = max(max_value, fabsf(mn[2]));
+
+  const double estimated_padding = max_value * static_cast<double>(velocity_scale) /
                                    max_voxel_size;
 
   return static_cast<int>(std::ceil(estimated_padding));
 }
+#endif
 
+#ifdef WITH_OPENVDB
 static openvdb::FloatGrid::ConstPtr get_vdb_for_attribute(Volume *volume, AttributeStandard std)
 {
   Attribute *attr = volume->attributes.find(std);
@@ -606,7 +493,7 @@ static void merge_scalar_grids_for_velocity(const Scene *scene, Volume *volume)
   vecgrid->tree().topologyUnion(vel_z_grid->tree());
 
   MergeScalarGrids op(&vel_x_grid->tree(), &vel_y_grid->tree(), &vel_z_grid->tree());
-  openvdb::tools::foreach (vecgrid->beginValueOn(), op, true, false);
+  openvdb::tools::foreach(vecgrid->beginValueOn(), op, true, false);
 
   /* Assume all grids have the same transformation. */
   const openvdb::math::Transform::Ptr transform = openvdb::ConstPtrCast<openvdb::math::Transform>(
@@ -619,7 +506,7 @@ static void merge_scalar_grids_for_velocity(const Scene *scene, Volume *volume)
   const ImageParams params;
   attr->data_voxel() = scene->image_manager->add_image(std::move(loader), params);
 }
-#endif
+#endif /* defined(WITH_OPENVDB) && defined(WITH_NANOVDB) */
 
 /* ************************************************************************** */
 
@@ -662,65 +549,45 @@ void GeometryManager::create_volume_mesh(const Scene *scene, Volume *volume, Pro
     return;
   }
 
+#if defined(WITH_OPENVDB) && defined(WITH_NANOVDB)
   /* Create volume mesh builder. */
   VolumeMeshBuilder builder;
-
-#ifdef WITH_OPENVDB
-  merge_scalar_grids_for_velocity(scene, volume);
 
   for (Attribute &attr : volume->attributes.attributes) {
     if (attr.element != ATTR_ELEMENT_VOXEL) {
       continue;
     }
 
-    bool do_clipping = false;
-
     ImageHandle &handle = attr.data_voxel();
 
-    /* Try building from OpenVDB grid directly. */
-    VDBImageLoader *vdb_loader = handle.vdb_loader();
-    openvdb::GridBase::ConstPtr grid;
-    if (vdb_loader) {
-      grid = vdb_loader->get_grid();
-
-      /* If building from an OpenVDB grid, we need to manually clip the values. */
-      do_clipping = true;
+    if (handle.empty()) {
+      continue;
     }
 
-    /* Else fall back to creating an OpenVDB grid from the dense volume data. */
-    if (!grid) {
-      device_texture *image_memory = handle.image_memory();
-
-      if (image_memory->data_elements == 1) {
-        grid = openvdb_grid_from_device_texture<openvdb::FloatGrid>(
-            image_memory, volume->get_clipping(), handle.metadata().transform_3d);
-      }
-      else if (image_memory->data_elements == 3) {
-        grid = openvdb_grid_from_device_texture<openvdb::Vec3fGrid>(
-            image_memory, volume->get_clipping(), handle.metadata().transform_3d);
-      }
-      else if (image_memory->data_elements == 4) {
-        grid = openvdb_grid_from_device_texture<openvdb::Vec4fGrid>(
-            image_memory, volume->get_clipping(), handle.metadata().transform_3d);
-      }
+    /* Create NanoVDB grid handle from texture memory. */
+    device_texture *texture = handle.image_memory();
+    if (texture == nullptr || texture->host_pointer == nullptr ||
+        texture->info.data_type == IMAGE_DATA_TYPE_NANOVDB_EMPTY ||
+        !is_nanovdb_type(texture->info.data_type))
+    {
+      continue;
     }
 
-    if (grid) {
-      /* Add padding based on the maximum velocity vector. */
-      if (attr.std == ATTR_STD_VOLUME_VELOCITY && scene->need_motion() != Scene::MOTION_NONE) {
-        pad_size = max(pad_size,
-                       estimate_required_velocity_padding(grid, volume->get_velocity_scale()));
-      }
+    nanovdb::GridHandle grid(
+        nanovdb::HostBuffer::createFull(texture->memory_size(), texture->host_pointer));
 
-      builder.add_grid(grid, do_clipping, volume->get_clipping());
+    /* Add padding based on the maximum velocity vector. */
+    if (attr.std == ATTR_STD_VOLUME_VELOCITY && scene->need_motion() != Scene::MOTION_NONE) {
+      pad_size = max(pad_size,
+                     estimate_required_velocity_padding(grid, volume->get_velocity_scale()));
     }
+
+    builder.add_grid(grid);
   }
-#else
-  (void)scene;
-#endif
 
   /* If nothing to build, early out. */
   if (builder.empty_grid()) {
+    LOG_DEBUG << "Memory usage volume mesh: 0 Mb. (empty grid)";
     return;
   }
 
@@ -736,7 +603,8 @@ void GeometryManager::create_volume_mesh(const Scene *scene, Volume *volume, Pro
   /* Create mesh. */
   vector<float3> vertices;
   vector<int> indices;
-  builder.create_mesh(vertices, indices, face_overlap_avoidance);
+  const bool ray_marching = scene->integrator->get_volume_ray_marching();
+  builder.create_mesh(vertices, indices, face_overlap_avoidance, ray_marching);
 
   volume->reserve_mesh(vertices.size(), indices.size() / 3);
   volume->used_shaders.clear();
@@ -751,10 +619,584 @@ void GeometryManager::create_volume_mesh(const Scene *scene, Volume *volume, Pro
   }
 
   /* Print stats. */
-  VLOG_WORK << "Memory usage volume mesh: "
+  LOG_DEBUG << "Memory usage volume mesh: "
             << (vertices.size() * sizeof(float3) + indices.size() * sizeof(int)) /
                    (1024.0 * 1024.0)
             << "Mb.";
+#else
+  (void)scene;
+#endif /* defined(WITH_OPENVDB) && defined(WITH_NANOVDB) */
+}
+
+void Volume::merge_grids(const Scene *scene)
+{
+#ifdef WITH_OPENVDB
+  merge_scalar_grids_for_velocity(scene, this);
+#else
+  (void)scene;
+#endif
+}
+
+VolumeManager::VolumeManager()
+{
+  need_rebuild_ = true;
+  need_update_step_size = true;
+}
+
+void VolumeManager::tag_update()
+{
+  need_rebuild_ = true;
+}
+
+/* Remove changed object from the list of octrees and tag for rebuild. */
+void VolumeManager::tag_update(const Object *object, uint32_t flag)
+{
+  if (object_octrees_.empty()) {
+    /* Volume object is not in the octree, can happen when using ray marching. */
+    return;
+  }
+
+  if (flag & ObjectManager::VISIBILITY_MODIFIED) {
+    tag_update();
+  }
+
+  for (const Node *node : object->get_geometry()->get_used_shaders()) {
+    const Shader *shader = static_cast<const Shader *>(node);
+    if (shader->has_volume_spatial_varying || (flag & ObjectManager::OBJECT_REMOVED)) {
+      /* TODO(weizhen): no need to update if the spatial variation is not in world space. */
+      tag_update();
+      object_octrees_.erase({object, shader});
+    }
+  }
+
+  if (!need_rebuild_ && (flag & ObjectManager::TRANSFORM_MODIFIED)) {
+    /* Octree is not tagged for rebuild, but the transformation changed, so a redraw is needed. */
+    update_visualization_ = true;
+  }
+}
+
+/* Remove object with changed shader from the list of octrees and tag for rebuild. */
+void VolumeManager::tag_update(const Shader *shader)
+{
+  tag_update();
+  for (auto it = object_octrees_.begin(); it != object_octrees_.end();) {
+    if (it->first.second == shader) {
+      it = object_octrees_.erase(it);
+    }
+    else {
+      it++;
+    }
+  }
+}
+
+/* Remove object with changed geometry from the list of octrees and tag for rebuild. */
+void VolumeManager::tag_update(const Geometry *geometry)
+{
+  tag_update();
+  /* Tag Octree for update. */
+  for (auto it = object_octrees_.begin(); it != object_octrees_.end();) {
+    const Object *object = it->first.first;
+    if (object->get_geometry() == geometry) {
+      it = object_octrees_.erase(it);
+    }
+    else {
+      it++;
+    }
+  }
+
+#ifdef WITH_OPENVDB
+  /* Tag VDB map for update. */
+  for (auto it = vdb_map_.begin(); it != vdb_map_.end();) {
+    if (it->first.first == geometry) {
+      it = vdb_map_.erase(it);
+    }
+    else {
+      it++;
+    }
+  }
+#endif
+}
+
+void VolumeManager::tag_update_indices()
+{
+  update_root_indices_ = true;
+}
+
+bool VolumeManager::is_homogeneous_volume(const Object *object, const Shader *shader)
+{
+  if (!shader->has_volume || shader->has_volume_spatial_varying) {
+    return false;
+  }
+
+  if (shader->has_volume_attribute_dependency) {
+    for (Attribute &attr : object->get_geometry()->attributes.attributes) {
+      /* If both the shader and the object needs volume attributes, the volume is heterogeneous. */
+      if (attr.element == ATTR_ELEMENT_VOXEL) {
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
+#ifdef WITH_OPENVDB
+/* Given a mesh, check if every edge has exactly two incident triangles, and if the two triangles
+ * have the same orientation. */
+static bool mesh_is_closed(const std::vector<openvdb::Vec3I> &triangles)
+{
+  const size_t num_triangles = triangles.size();
+  if (num_triangles % 2) {
+    return false;
+  }
+
+  /* Store the two vertices that forms an edge. */
+  std::multiset<std::pair<int, int>> edges;
+  int num_edges = 0;
+
+  for (const auto &tri : triangles) {
+    for (int i = 0; i < 3; i++) {
+      const std::pair<int, int> e = {tri[i], tri[(i + 1) % 3]};
+      if (edges.count(e)) {
+        /* Same edge exists. */
+        return false;
+      }
+
+      /* Check if an edge in the opposite order exists. */
+      const auto count = edges.count({e.second, e.first});
+      if (count > 1) {
+        /* Edge has more than 2 incident faces. */
+        return false;
+      }
+      if (count == 1) {
+        /* If an edge in the opposite order exists, increment the count. */
+        edges.insert({e.second, e.first});
+      }
+      else {
+        /* Insert a new edge. */
+        num_edges++;
+        edges.insert(e);
+      }
+    }
+  }
+
+  /* Until this point, the count of each element in the set is at most 2; to check if they are
+   * exactly 2, we just need to compare the total numbers. */
+  return num_triangles * 3 == num_edges * 2;
+}
+
+openvdb::BoolGrid::ConstPtr VolumeManager::mesh_to_sdf_grid(const Mesh *mesh,
+                                                            const Shader *shader,
+                                                            const float half_width)
+{
+  const int num_verts = mesh->get_verts().size();
+  std::vector<openvdb::Vec3f> points(num_verts);
+  parallel_for(0, num_verts, [&](int i) {
+    const float3 &vert = mesh->get_verts()[i];
+    points[i] = openvdb::Vec3f(vert.x, vert.y, vert.z);
+  });
+
+  const int max_num_triangles = mesh->num_triangles();
+  std::vector<openvdb::Vec3I> triangles;
+  triangles.reserve(max_num_triangles);
+  for (int i = 0; i < max_num_triangles; i++) {
+    /* Only push triangles with matching shader. */
+    const int shader_index = mesh->get_shader()[i];
+    if (static_cast<const Shader *>(mesh->get_used_shaders()[shader_index]) == shader) {
+      triangles.emplace_back(mesh->get_triangles()[i * 3],
+                             mesh->get_triangles()[i * 3 + 1],
+                             mesh->get_triangles()[i * 3 + 2]);
+    }
+  }
+
+  if (!mesh_is_closed(triangles)) {
+    /* `meshToLevelSet()` requires a closed mesh, otherwise we can not determine the interior of
+     * the mesh. Evaluate the whole bounding box in this case. */
+    return openvdb::BoolGrid::create();
+  }
+
+  /* TODO(weizhen): Should consider object instead of mesh size. */
+  const float3 mesh_size = mesh->bounds.size();
+  const auto vdb_voxel_size = openvdb::Vec3d(mesh_size.x, mesh_size.y, mesh_size.z) /
+                              double(1 << VOLUME_OCTREE_MAX_DEPTH);
+
+  auto xform = openvdb::math::Transform::createLinearTransform(1.0);
+  xform->postScale(vdb_voxel_size);
+
+  auto sdf_grid = openvdb::tools::meshToLevelSet<openvdb::FloatGrid>(
+      *xform, points, triangles, half_width);
+
+  return openvdb::tools::sdfInteriorMask(*sdf_grid, 0.5 * vdb_voxel_size.length());
+}
+
+openvdb::BoolGrid::ConstPtr VolumeManager::get_vdb(const Geometry *geom,
+                                                   const Shader *shader) const
+{
+  if (geom->is_mesh()) {
+    if (auto it = vdb_map_.find({geom, shader}); it != vdb_map_.end()) {
+      return it->second;
+    }
+  }
+  /* Create empty grid. */
+  return openvdb::BoolGrid::create();
+}
+#endif
+
+void VolumeManager::initialize_octree(const Scene *scene, Progress &progress)
+{
+  /* Instanced objects without spatial variation can share one octree. */
+  std::map<std::pair<const Geometry *, const Shader *>, std::shared_ptr<Octree>> geometry_octrees;
+  for (const auto &it : object_octrees_) {
+    const Shader *shader = it.first.second;
+    if (!shader->has_volume_spatial_varying) {
+      if (const Object *object = it.first.first) {
+        geometry_octrees[{object->get_geometry(), shader}] = it.second;
+      }
+    }
+  }
+
+  /* Loop through the volume objects to initialize their root nodes. */
+  for (const Object *object : scene->objects) {
+    const Geometry *geom = object->get_geometry();
+    if (!geom->has_volume) {
+      continue;
+    }
+
+    /* Create Octree. */
+    for (const Node *node : geom->get_used_shaders()) {
+      const Shader *shader = static_cast<const Shader *>(node);
+      if (!shader->has_volume) {
+        continue;
+      }
+
+      if (object_octrees_.find({object, shader}) == object_octrees_.end()) {
+        if (geom->is_light()) {
+          const Light *light = static_cast<const Light *>(geom);
+          if (light->get_light_type() == LIGHT_BACKGROUND) {
+            /* World volume is unbounded, use some practical large number instead. */
+            const float3 size = make_float3(10000.0f);
+            object_octrees_[{object, shader}] = std::make_shared<Octree>(BoundBox(-size, size));
+          }
+        }
+        else {
+          const Mesh *mesh = static_cast<const Mesh *>(geom);
+          if (is_zero(mesh->bounds.size())) {
+            continue;
+          }
+          if (!shader->has_volume_spatial_varying) {
+            /* TODO(weizhen): check object attribute. */
+            if (auto it = geometry_octrees.find({geom, shader}); it != geometry_octrees.end()) {
+              /* Share octree with other instances. */
+              object_octrees_[{object, shader}] = it->second;
+            }
+            else {
+              auto octree = std::make_shared<Octree>(mesh->bounds);
+              geometry_octrees[{geom, shader}] = octree;
+              object_octrees_[{object, shader}] = octree;
+            }
+          }
+          else {
+            /* TODO(weizhen): we can still share the octree if the spatial variation is in object
+             * space, but that might be tricky to determine. */
+            object_octrees_[{object, shader}] = std::make_shared<Octree>(mesh->bounds);
+          }
+        }
+      }
+
+#ifdef WITH_OPENVDB
+      if (geom->is_mesh() && !VolumeManager::is_homogeneous_volume(object, shader) &&
+          vdb_map_.find({geom, shader}) == vdb_map_.end())
+      {
+        const Mesh *mesh = static_cast<const Mesh *>(geom);
+        const float3 dim = mesh->bounds.size();
+        if (dim.x > 0.0f && dim.y > 0.0f && dim.z > 0.0f) {
+          const char *name = object->get_asset_name().c_str();
+          progress.set_substatus(string_printf("Creating SDF grid for %s", name));
+          vdb_map_[{geom, shader}] = mesh_to_sdf_grid(mesh, shader, 1.0f);
+        }
+      }
+#else
+      (void)progress;
+#endif
+    }
+  }
+}
+
+void VolumeManager::update_num_octree_nodes()
+{
+  num_octree_nodes_ = 0;
+  num_octree_roots_ = 0;
+
+  std::set<const Octree *> unique_octrees;
+  for (const auto &it : object_octrees_) {
+    const Octree *octree = it.second.get();
+    if (unique_octrees.find(octree) != unique_octrees.end()) {
+      continue;
+    }
+
+    unique_octrees.insert(octree);
+
+    num_octree_roots_++;
+    num_octree_nodes_ += octree->get_num_nodes();
+  }
+}
+
+int VolumeManager::num_octree_nodes() const
+{
+  return num_octree_nodes_;
+}
+
+int VolumeManager::num_octree_roots() const
+{
+  return num_octree_roots_;
+}
+
+void VolumeManager::build_octree(Device *device, Progress &progress)
+{
+  const double start_time = time_dt();
+
+  for (auto &it : object_octrees_) {
+    if (it.second->is_built()) {
+      continue;
+    }
+
+    const Object *object = it.first.first;
+    const Shader *shader = it.first.second;
+#ifdef WITH_OPENVDB
+    openvdb::BoolGrid::ConstPtr interior_mask = get_vdb(object->get_geometry(), shader);
+    it.second->build(device, progress, interior_mask, object, shader);
+#else
+    it.second->build(device, progress, object, shader);
+#endif
+  }
+
+  update_num_octree_nodes();
+
+  const double build_time = time_dt() - start_time;
+
+  LOG_DEBUG << object_octrees_.size() << " volume octree(s) with a total of " << num_octree_nodes()
+            << " nodes are built in " << build_time << " seconds.";
+}
+
+void VolumeManager::update_root_indices(DeviceScene *dscene, const Scene *scene) const
+{
+  if (object_octrees_.empty()) {
+    return;
+  }
+
+  /* Keep track of the root index of the unique octrees. */
+  std::map<const Octree *, int> octree_root_indices;
+
+  int *roots = dscene->volume_tree_root_ids.alloc(scene->objects.size());
+
+  int root_index = 0;
+  for (const auto &it : object_octrees_) {
+    const Object *object = it.first.first;
+    const int object_id = object->get_device_index();
+    const Octree *octree = it.second.get();
+    auto entry = octree_root_indices.find(octree);
+    if (entry == octree_root_indices.end()) {
+      roots[object_id] = root_index;
+      octree_root_indices[octree] = root_index;
+
+      root_index++;
+    }
+    else {
+      /* Instances share the same octree. */
+      roots[object_id] = entry->second;
+    }
+  }
+
+  dscene->volume_tree_root_ids.copy_to_device();
+}
+
+void VolumeManager::flatten_octree(DeviceScene *dscene, const Scene *scene) const
+{
+  if (object_octrees_.empty()) {
+    return;
+  }
+
+  update_root_indices(dscene, scene);
+
+  for (const auto &it : object_octrees_) {
+    /* Octrees need to be re-flattened. */
+    it.second->set_flattened(false);
+  }
+
+  KernelOctreeRoot *kroots = dscene->volume_tree_roots.alloc(num_octree_roots());
+  KernelOctreeNode *knodes = dscene->volume_tree_nodes.alloc(num_octree_nodes());
+
+  int node_index = 0;
+  int root_index = 0;
+  for (const auto &it : object_octrees_) {
+    std::shared_ptr<Octree> octree = it.second;
+    if (octree->is_flattened()) {
+      continue;
+    }
+
+    /* If an object has multiple shaders, the root index is overwritten, so we also write the
+     * shader id, and perform a linear search in the kernel to find the correct octree. */
+    kroots[root_index].shader = it.first.second->id;
+    kroots[root_index].id = node_index;
+
+    /* Transform from object space into octree space. */
+    auto root = octree->get_root();
+    const float3 scale = 1.0f / root->bbox.size();
+    kroots[root_index].scale = scale;
+    kroots[root_index].translation = -root->bbox.min * scale + 1.0f;
+
+    root_index++;
+
+    /* Flatten octree. */
+    const uint current_index = node_index++;
+    knodes[current_index].parent = -1;
+    octree->flatten(knodes, current_index, root, node_index);
+    octree->set_flattened();
+  }
+
+  dscene->volume_tree_nodes.copy_to_device();
+  dscene->volume_tree_roots.copy_to_device();
+
+  LOG_DEBUG << "Memory usage of volume octrees: "
+            << (dscene->volume_tree_nodes.size() * sizeof(KernelOctreeNode) +
+                dscene->volume_tree_roots.size() * sizeof(KernelOctreeRoot) +
+                dscene->volume_tree_root_ids.size() * sizeof(int)) /
+                   (1024.0 * 1024.0)
+            << "Mb.";
+}
+
+/* Dump octree as python script, enabled by `CYCLES_VOLUME_OCTREE_DUMP` environment variable. */
+std::string VolumeManager::visualize_octree(const char *filename) const
+{
+  const std::string filename_full = path_join(OIIO::Filesystem::current_path(), filename);
+
+  std::ofstream file(filename_full);
+  if (file.is_open()) {
+    std::ostringstream buffer;
+    file << "# Visualize volume octree.\n\n"
+            "import bpy\nimport mathutils\n\n"
+            "if bpy.context.active_object:\n"
+            "    bpy.context.active_object.select_set(False)\n\n"
+            "octree = bpy.data.collections.new(name='Octree')\n"
+            "bpy.context.scene.collection.children.link(octree)\n\n";
+
+    for (const auto &it : object_octrees_) {
+      /* Draw Octree. */
+      const auto octree = it.second;
+      const std::string object_name = it.first.first->get_asset_name().string();
+      octree->visualize(file, object_name);
+
+      /* Apply transform. */
+      const Object *object = it.first.first;
+      const Geometry *geom = object->get_geometry();
+      if (!geom->is_light() && !geom->transform_applied) {
+        const Transform t = object->get_tfm();
+        file << "obj.matrix_world = mathutils.Matrix((" << t.x << ", " << t.y << ", " << t.z
+             << ", (" << 0 << "," << 0 << "," << 0 << "," << 1 << ")))\n\n";
+      }
+    }
+
+    file.close();
+  }
+
+  return filename_full;
+}
+
+void VolumeManager::update_step_size(const Scene *scene, DeviceScene *dscene)
+{
+  assert(scene->integrator->get_volume_ray_marching());
+
+  if (!need_update_step_size && !dscene->volume_step_size.is_modified() &&
+      !scene->integrator->volume_step_rate_is_modified() && last_algorithm == RAY_MARCHING)
+  {
+    return;
+  }
+
+  if (dscene->volume_step_size.need_realloc()) {
+    dscene->volume_step_size.alloc(scene->objects.size());
+  }
+
+  float *volume_step_size = dscene->volume_step_size.data();
+
+  for (const Object *object : scene->objects) {
+    const Geometry *geom = object->get_geometry();
+    if (!geom->has_volume) {
+      continue;
+    }
+
+    volume_step_size[object->index] = scene->integrator->get_volume_step_rate() *
+                                      object->compute_volume_step_size();
+  }
+
+  dscene->volume_step_size.copy_to_device();
+  dscene->volume_step_size.clear_modified();
+  need_update_step_size = false;
+}
+
+void VolumeManager::device_update(Device *device,
+                                  DeviceScene *dscene,
+                                  const Scene *scene,
+                                  Progress &progress)
+{
+  if (scene->integrator->get_volume_ray_marching()) {
+    /* No need to update octree for ray marching. */
+    if (last_algorithm == NULL_SCATTERING) {
+      dscene->volume_tree_nodes.free();
+      dscene->volume_tree_roots.free();
+      dscene->volume_tree_root_ids.free();
+    }
+    update_step_size(scene, dscene);
+    last_algorithm = RAY_MARCHING;
+    return;
+  }
+
+  if (need_rebuild_ || last_algorithm == RAY_MARCHING) {
+    /* Data needed for volume shader evaluation. */
+    device->const_copy_to("data", &dscene->data, sizeof(dscene->data));
+
+    initialize_octree(scene, progress);
+    build_octree(device, progress);
+    flatten_octree(dscene, scene);
+
+    update_visualization_ = true;
+    need_rebuild_ = false;
+    update_root_indices_ = false;
+  }
+  else if (update_root_indices_) {
+    update_root_indices(dscene, scene);
+    update_root_indices_ = false;
+  }
+
+  if (update_visualization_) {
+    static const bool dump_octree = getenv("CYCLES_VOLUME_OCTREE_DUMP") != nullptr;
+    if (dump_octree) {
+      const std::string octree_path = visualize_octree("octree.py");
+      LOG_INFO << "Octree visualization has been written to " << octree_path;
+    }
+    update_visualization_ = false;
+  }
+
+  if (last_algorithm == RAY_MARCHING) {
+    dscene->volume_step_size.free();
+  }
+  last_algorithm = NULL_SCATTERING;
+}
+
+void VolumeManager::device_free(DeviceScene *dscene)
+{
+  dscene->volume_tree_nodes.free();
+  dscene->volume_tree_roots.free();
+  dscene->volume_tree_root_ids.free();
+  dscene->volume_step_size.free();
+}
+
+VolumeManager::~VolumeManager()
+{
+#ifdef WITH_OPENVDB
+  for (auto &it : vdb_map_) {
+    it.second.reset();
+  }
+#endif
 }
 
 CCL_NAMESPACE_END

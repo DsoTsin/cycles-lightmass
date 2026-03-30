@@ -1,6 +1,7 @@
 /* SPDX-FileCopyrightText: 2020-2021 Contributors to the OpenVDB Project
+ * SPDX-FileCopyrightText: 2023-2025 Blender Authors
  *
- * SPDX-License-Identifier: MPL-2.0
+ * SPDX-License-Identifier: Apache-2.0
  *
  * This is an extract from NanoVDB.h, with minimal code needed for kernel side access to grids. The
  * original headers are not compatible with Metal due to missing address space qualifiers. */
@@ -8,7 +9,9 @@
 #pragma once
 
 #include "util/defines.h"
+#include "util/math_int3.h"
 #include "util/types_base.h"
+#include "util/types_int3.h"
 
 #ifndef __KERNEL_GPU__
 #  include <climits>
@@ -32,17 +35,8 @@ const ccl_device ccl_global DstT *PtrAdd(const ccl_global SrcT *p, int64_t offse
 
 /* Coord */
 
-struct Coord {
-  int x, y, z;
-
-  ccl_device_inline_method explicit Coord(int32_t n) : x(n), y(n), z(n) {}
-  ccl_device_inline_method Coord(int32_t x, int32_t y, int32_t z) : x(x), y(y), z(z) {}
-
-  ccl_device_inline_method Coord operator&(int32_t n) const
-  {
-    return Coord(x & n, y & n, z & n);
-  }
-};
+using Coord = int3;
+using PackedCoord = packed_int3;
 
 /* Mask */
 
@@ -124,7 +118,7 @@ template<typename ChildT> struct alignas(NANOVDB_DATA_ALIGNMENT) RootNode {
     return ijk & ~ChildT::MASK;
   }
 #endif
-  Coord mBBox[2];
+  PackedCoord mBBox[2];
   uint32_t mTableSize;
 
   ValueType mBackground;
@@ -174,7 +168,7 @@ struct alignas(NANOVDB_DATA_ALIGNMENT) InternalNode {
     int64_t child;
   };
 
-  Coord mBBox[2];
+  PackedCoord mBBox[2];
   uint64_t mFlags;
   Mask<Log2Dim> mValueMask;
   Mask<Log2Dim> mChildMask;
@@ -211,7 +205,7 @@ template<typename ValueT, const uint32_t LOG2DIM> struct alignas(NANOVDB_DATA_AL
   using ValueType = ValueT;
   using BuildType = ValueT;
 
-  Coord mBBoxMin;
+  PackedCoord mBBoxMin;
   uint8_t mBBoxDif[3];
   uint8_t mFlags;
   Mask<LOG2DIM> mValueMask;
@@ -231,7 +225,7 @@ template<typename ValueT, const uint32_t LOG2DIM> struct alignas(NANOVDB_DATA_AL
 /* LeafFnBase */
 
 template<uint32_t LOG2DIM> struct alignas(NANOVDB_DATA_ALIGNMENT) LeafFnBase {
-  Coord mBBoxMin;
+  PackedCoord mBBoxMin;
   uint8_t mBBoxDif[3];
   uint8_t mFlags;
   Mask<LOG2DIM> mValueMask;
@@ -366,7 +360,7 @@ template<typename BuildT> class CachedReadAccessor {
   using LowerT = NanoLower<BuildT>;
   using LeafT = NanoLeaf<BuildT>;
 
-  mutable Coord mKeys[3] = {Coord(INT_MAX), Coord(INT_MAX), Coord(INT_MAX)};
+  mutable Coord mKeys[3] = {make_int3(INT_MAX), make_int3(INT_MAX), make_int3(INT_MAX)};
   mutable const ccl_global RootT *mRoot = nullptr;
   mutable const ccl_global void *mNode[3] = {nullptr, nullptr, nullptr};
 

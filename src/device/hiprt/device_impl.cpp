@@ -4,8 +4,10 @@
 
 #ifdef WITH_HIPRT
 
-#  include "device/hiprt/device_impl.h"
+#  include <iomanip>
+
 #  include "device/hip/util.h"
+#  include "device/hiprt/device_impl.h"
 #  include "kernel/device/hiprt/globals.h"
 
 #  include "util/log.h"
@@ -101,7 +103,7 @@ HIPRTDevice::HIPRTDevice(const DeviceInfo &info,
     return;
   }
 
-  if (VLOG_DEBUG_IS_ON) {
+  if (LOG_IS_ON(LOG_LEVEL_TRACE)) {
     hiprtSetLogLevel(hiprtLogLevelInfo | hiprtLogLevelWarn | hiprtLogLevelError);
   }
   else {
@@ -112,6 +114,7 @@ HIPRTDevice::HIPRTDevice(const DeviceInfo &info,
 HIPRTDevice::~HIPRTDevice()
 {
   HIPContextScope scope(this);
+  free_bvh_memory_delayed();
   user_instance_id.free();
   prim_visibility.free();
   hiprt_blas_ptr.free();
@@ -152,9 +155,9 @@ string HIPRTDevice::compile_kernel(const uint kernel_features, const char *name,
 
   if (!use_adaptive_compilation()) {
     const string fatbin = path_get(string_printf("lib/%s_rt_%s.hipfb.zst", name, arch.c_str()));
-    VLOG(1) << "Testing for pre-compiled kernel " << fatbin << ".";
+    LOG_INFO << "Testing for pre-compiled kernel " << fatbin << ".";
     if (path_exists(fatbin)) {
-      VLOG(1) << "Using precompiled kernel.";
+      LOG_INFO << "Using precompiled kernel.";
       return fatbin;
     }
   }
@@ -171,9 +174,9 @@ string HIPRTDevice::compile_kernel(const uint kernel_features, const char *name,
   const string fatbin = path_cache_get(path_join("kernels", fatbin_file));
   const string hiprt_include_path = path_join(source_path, "kernel/device/hiprt");
 
-  VLOG(1) << "Testing for locally compiled kernel " << fatbin << ".";
+  LOG_INFO << "Testing for locally compiled kernel " << fatbin << ".";
   if (path_exists(fatbin)) {
-    VLOG(1) << "Using locally compiled kernel.";
+    LOG_INFO << "Using locally compiled kernel.";
     return fatbin;
   }
 
@@ -206,13 +209,10 @@ string HIPRTDevice::compile_kernel(const uint kernel_features, const char *name,
   }
 
   const int hipcc_hip_version = hipewCompilerVersion();
-  VLOG_INFO << "Found hipcc " << hipcc << ", HIP version " << hipcc_hip_version << ".";
+  LOG_INFO << "Found hipcc " << hipcc << ", HIP version " << hipcc_hip_version << ".";
   if (hipcc_hip_version < 40) {
-    printf(
-        "Unsupported HIP version %d.%d detected, "
-        "you need HIP 4.0 or newer.\n",
-        hipcc_hip_version / 10,
-        hipcc_hip_version % 10);
+    LOG_WARNING << "Unsupported HIP version " << hipcc_hip_version / 10 << "."
+                << hipcc_hip_version % 10 << ", you need HIP 4.0 or newer.\n";
     return string();
   }
 
@@ -223,30 +223,25 @@ string HIPRTDevice::compile_kernel(const uint kernel_features, const char *name,
 
   const char *const kernel_ext = "genco";
   string options;
-  options.append(
-      "-Wno-parentheses-equality -Wno-unused-value -ffast-math -O3 -std=c++17 -D __HIPRT__");
+  options.append("-Wno-parentheses-equality -Wno-unused-value -ffast-math -O3 -std=c++17");
   options.append(" --offload-arch=").append(arch.c_str());
-  if (hipNeedPreciseMath(arch)) {
-    options.append(
-        " -fhip-fp32-correctly-rounded-divide-sqrt -fno-gpu-approx-transcendentals "
-        "-fgpu-flush-denormals-to-zero -ffp-contract=off");
-  }
-#  ifdef WITH_NANOVDB
-  options.append(" -D WITH_NANOVDB");
-#  endif
 
-  printf("Compiling  %s and caching to %s", source_path.c_str(), fatbin.c_str());
+  LOG_INFO_IMPORTANT << "Compiling " << source_path << " and caching to " << fatbin;
 
   double starttime = time_dt();
 
-  string compile_command = string_printf("%s %s -I %s -I %s --%s %s -o \"%s\"",
+  string compile_command = string_printf("%s %s -I %s -I %s --%s %s -o \"%s\" %s",
                                          hipcc,
                                          options.c_str(),
                                          include_path.c_str(),
                                          hiprt_include_path.c_str(),
                                          kernel_ext,
                                          source_path.c_str(),
-                                         fatbin.c_str());
+                                         fatbin.c_str(),
+                                         common_cflags.c_str());
+
+  LOG_INFO_IMPORTANT << "Compiling " << ((use_adaptive_compilation()) ? "adaptive " : "")
+                     << "HIP-RT kernel ... " << compile_command;
 
 #  ifdef _WIN32
   compile_command = "call " + compile_command;
@@ -258,7 +253,8 @@ string HIPRTDevice::compile_kernel(const uint kernel_features, const char *name,
     return string();
   }
 
-  printf("Kernel compilation finished in %.2lfs.\n", time_dt() - starttime);
+  LOG_INFO_IMPORTANT << "Kernel compilation finished in " << std::fixed << std::setprecision(2)
+                     << time_dt() - starttime << "s";
 
   return fatbin;
 }
@@ -267,7 +263,7 @@ bool HIPRTDevice::load_kernels(const uint kernel_features)
 {
   if (hipModule) {
     if (use_adaptive_compilation()) {
-      VLOG(1) << "Skipping HIP kernel reload for adaptive compilation, not currently supported.";
+      LOG_INFO << "Skipping HIP kernel reload for adaptive compilation, not currently supported.";
     }
     return true;
   }
@@ -284,7 +280,7 @@ bool HIPRTDevice::load_kernels(const uint kernel_features)
    * This is necessary since objects may be reported to have motion if the Vector pass is
    * active, but may still need to be rendered without motion blur if that isn't active as well.
    */
-  use_motion_blur |= kernel_features & KERNEL_FEATURE_OBJECT_MOTION;
+  use_motion_blur = use_motion_blur || (kernel_features & KERNEL_FEATURE_OBJECT_MOTION);
 
   /* get kernel */
   const char *kernel_name = "kernel";
@@ -1155,12 +1151,33 @@ hiprtScene HIPRTDevice::build_tlas(BVHHIPRT *bvh,
   return scene;
 }
 
+void HIPRTDevice::free_bvh_memory_delayed()
+{
+  thread_scoped_lock lock(hiprt_mutex);
+  if (stale_bvh.size()) {
+    for (int bvh_index = 0; bvh_index < stale_bvh.size(); bvh_index++) {
+      hiprtGeometry hiprt_geom = stale_bvh[bvh_index];
+      hiprtDestroyGeometry(hiprt_context, hiprt_geom);
+      hiprt_geom = nullptr;
+    }
+    stale_bvh.clear();
+  }
+}
+
+void HIPRTDevice::release_bvh(BVH *bvh)
+{
+  BVHHIPRT *current_bvh = static_cast<BVHHIPRT *>(bvh);
+  thread_scoped_lock lock(hiprt_mutex);
+  /* Tracks BLAS pointers whose BVH destructors have been called. */
+  stale_bvh.push_back(current_bvh->hiprt_geom);
+}
+
 void HIPRTDevice::build_bvh(BVH *bvh, Progress &progress, bool refit)
 {
   if (have_error()) {
     return;
   }
-
+  free_bvh_memory_delayed();
   progress.set_substatus("Building HIPRT acceleration structure");
 
   hiprtBuildOptions options;
@@ -1178,6 +1195,7 @@ void HIPRTDevice::build_bvh(BVH *bvh, Progress &progress, bool refit)
 
     if (scene) {
       hiprtDestroyScene(hiprt_context, scene);
+      scene = nullptr;
     }
     scene = build_tlas(bvh_rt, bvh_rt->objects, options, refit);
   }

@@ -43,7 +43,7 @@ ccl_device int shadow_linking_pick_mesh_intersection(KernelGlobals kg,
   const uint visibility = path_state_ray_visibility(state);
 
   int transparent_bounce = INTEGRATOR_STATE(state, path, transparent_bounce);
-  int volume_bounce = INTEGRATOR_STATE(state, path, volume_bounce);
+  int volume_bounds_bounce = INTEGRATOR_STATE(state, path, volume_bounds_bounce);
 
   /* TODO: Replace the look with sequential calls to the kernel, similar to the transparent shadow
    * intersection kernel. */
@@ -88,17 +88,17 @@ ccl_device int shadow_linking_pick_mesh_intersection(KernelGlobals kg,
     else {
       /* Lights past the maximum allowed transparency bounce do not contribute any light, so
        * consider them as fully blocked and only consider lights prior to this intersection.  */
-      if (shader_flags & SD_HAS_TRANSPARENT_SHADOW) {
-        ++transparent_bounce;
-        if (transparent_bounce >= kernel_data.integrator.transparent_max_bounce) {
+      if (shader_flags & SD_HAS_ONLY_VOLUME) {
+        ++volume_bounds_bounce;
+        if (volume_bounds_bounce >= VOLUME_BOUNDS_MAX) {
           ray->tmax = current_isect.t;
           break;
         }
       }
       else {
-        kernel_assert(shader_flags & SD_HAS_ONLY_VOLUME);
-        ++volume_bounce;
-        if (volume_bounce >= kernel_data.integrator.max_volume_bounce) {
+        kernel_assert(shader_flags & SD_HAS_TRANSPARENT_SHADOW);
+        ++transparent_bounce;
+        if (transparent_bounce >= kernel_data.integrator.transparent_max_bounce) {
           ray->tmax = current_isect.t;
           break;
         }
@@ -205,8 +205,7 @@ ccl_device bool shadow_linking_intersect(KernelGlobals kg, IntegratorState state
    * shade_dedicated_light kernel can use it for calculation of the light sample. */
   integrator_state_write_isect(state, &isect);
 
-  integrator_path_next(kg,
-                       state,
+  integrator_path_next(state,
                        DEVICE_KERNEL_INTEGRATOR_INTERSECT_DEDICATED_LIGHT,
                        DEVICE_KERNEL_INTEGRATOR_SHADE_DEDICATED_LIGHT);
 
@@ -227,8 +226,7 @@ ccl_device void integrator_intersect_dedicated_light(KernelGlobals kg, Integrato
   kernel_assert(!"integrator_intersect_dedicated_light is not supposed to be scheduled");
 #endif
 
-  integrator_shade_surface_next_kernel<DEVICE_KERNEL_INTEGRATOR_INTERSECT_DEDICATED_LIGHT>(kg,
-                                                                                           state);
+  integrator_shade_surface_next_kernel<DEVICE_KERNEL_INTEGRATOR_INTERSECT_DEDICATED_LIGHT>(state);
 }
 
 CCL_NAMESPACE_END

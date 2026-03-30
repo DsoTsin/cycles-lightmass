@@ -29,6 +29,7 @@ struct PassInfo {
   bool use_filter = false;
   bool use_exposure = false;
   bool is_written = true;
+  float scale = 1.0f;
   PassType divide_type = PASS_NONE;
   PassType direct_type = PASS_NONE;
   PassType indirect_type = PASS_NONE;
@@ -66,8 +67,8 @@ class Pass : public Node {
   bool is_written() const;
 
  protected:
-  /* The has been created automatically as a requirement to various rendering functionality (such
-   * as adaptive sampling). */
+  /* This has been created automatically as a requirement to various rendering functionality
+   * (such as adaptive sampling). */
   bool is_auto_;
 
  public:
@@ -75,6 +76,7 @@ class Pass : public Node {
   static const NodeEnum *get_mode_enum();
 
   static PassInfo get_info(PassType type,
+                           const PassMode mode = PassMode::DENOISED,
                            const bool include_albedo = false,
                            const bool is_lightgroup = false);
 
@@ -94,5 +96,7 @@ class Pass : public Node {
 };
 
 std::ostream &operator<<(std::ostream &os, const Pass &pass);
+
+bool is_volume_guiding_pass(const PassType pass_type);
 
 CCL_NAMESPACE_END

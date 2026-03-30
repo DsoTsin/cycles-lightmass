@@ -14,6 +14,7 @@
 #include "scene/stats.h"
 #include "scene/tables.h"
 
+#include "util/log.h"
 #include "util/math.h"
 #include "util/math_cdf.h"
 #include "util/time.h"
@@ -120,6 +121,8 @@ NODE_DEFINE(Film)
 
   SOCKET_BOOLEAN(use_approximate_shadow_catcher, "Use Approximate Shadow Catcher", false);
 
+  SOCKET_BOOLEAN(use_sample_count, "Use Sample Count Pass", false);
+
   return type;
 }
 
@@ -184,6 +187,11 @@ void Film::device_update(Device *device, DeviceScene *dscene, Scene *scene)
   kfilm->pass_transmission_indirect = PASS_UNUSED;
   kfilm->pass_volume_direct = PASS_UNUSED;
   kfilm->pass_volume_indirect = PASS_UNUSED;
+  kfilm->pass_volume_scatter = PASS_UNUSED;
+  kfilm->pass_volume_transmit = PASS_UNUSED;
+  kfilm->pass_volume_scatter_denoised = PASS_UNUSED;
+  kfilm->pass_volume_transmit_denoised = PASS_UNUSED;
+  kfilm->pass_volume_majorant = PASS_UNUSED;
   kfilm->pass_lightgroup = PASS_UNUSED;
 
   /* Mark passes as unused so that the kernel knows the pass is inaccessible. */
@@ -191,6 +199,7 @@ void Film::device_update(Device *device, DeviceScene *dscene, Scene *scene)
   kfilm->pass_denoising_albedo = PASS_UNUSED;
   kfilm->pass_denoising_depth = PASS_UNUSED;
   kfilm->pass_sample_count = PASS_UNUSED;
+  kfilm->pass_render_time = PASS_UNUSED;
   kfilm->pass_adaptive_aux_buffer = PASS_UNUSED;
   kfilm->pass_shadow_catcher = PASS_UNUSED;
   kfilm->pass_shadow_catcher_sample_count = PASS_UNUSED;
@@ -215,6 +224,12 @@ void Film::device_update(Device *device, DeviceScene *dscene, Scene *scene)
     if (pass->get_mode() == PassMode::DENOISED) {
       /* Generally we only storing offsets of the noisy passes. The display pass is an exception
        * since it is a read operation and not a write. */
+      if (pass->get_type() == PASS_VOLUME_TRANSMIT) {
+        kfilm->pass_volume_transmit_denoised = kfilm->pass_stride;
+      }
+      else if (pass->get_type() == PASS_VOLUME_SCATTER) {
+        kfilm->pass_volume_scatter_denoised = kfilm->pass_stride;
+      }
       kfilm->pass_stride += pass->get_info().num_components;
       continue;
     }
@@ -325,6 +340,18 @@ void Film::device_update(Device *device, DeviceScene *dscene, Scene *scene)
       case PASS_VOLUME_DIRECT:
         kfilm->pass_volume_direct = kfilm->pass_stride;
         break;
+      case PASS_VOLUME_SCATTER:
+        kfilm->pass_volume_scatter = kfilm->pass_stride;
+        break;
+      case PASS_VOLUME_TRANSMIT:
+        kfilm->pass_volume_transmit = kfilm->pass_stride;
+        break;
+      case PASS_VOLUME_MAJORANT:
+        kfilm->pass_volume_majorant = kfilm->pass_stride;
+        break;
+      case PASS_VOLUME_MAJORANT_SAMPLE_COUNT:
+        kfilm->pass_volume_majorant_sample_count = kfilm->pass_stride;
+        break;
 
       case PASS_BAKE_PRIMITIVE:
         kfilm->pass_bake_primitive = kfilm->pass_stride;
@@ -368,6 +395,9 @@ void Film::device_update(Device *device, DeviceScene *dscene, Scene *scene)
         break;
       case PASS_SAMPLE_COUNT:
         kfilm->pass_sample_count = kfilm->pass_stride;
+        break;
+      case PASS_RENDER_TIME:
+        kfilm->pass_render_time = kfilm->pass_stride;
         break;
 
       case PASS_AOV_COLOR:
@@ -468,15 +498,15 @@ bool Film::update_lightgroups(Scene *scene)
   return false;
 }
 
-void Film::update_passes(Scene *scene, bool add_sample_count_pass)
+void Film::update_passes(Scene *scene)
 {
   const Background *background = scene->background;
   const BakeManager *bake_manager = scene->bake_manager.get();
   const ObjectManager *object_manager = scene->object_manager.get();
   Integrator *integrator = scene->integrator;
 
-  if (!is_modified() && !object_manager->need_update() && !integrator->is_modified() &&
-      !background->is_modified())
+  if (!object_manager->need_update() && !integrator->is_modified() && !background->is_modified() &&
+      !scene->has_volume_modified())
   {
     return;
   }
@@ -561,10 +591,25 @@ void Film::update_passes(Scene *scene, bool add_sample_count_pass)
     }
   }
 
-  if (add_sample_count_pass) {
+  /* Add sample count pass for tiled rendering. */
+  if (use_sample_count) {
     if (!Pass::contains(scene->passes, PASS_SAMPLE_COUNT)) {
       add_auto_pass(scene, PASS_SAMPLE_COUNT);
     }
+  }
+
+  if (scene->has_volume()) {
+    add_auto_pass(scene, PASS_VOLUME_SCATTER);
+    add_auto_pass(scene, PASS_VOLUME_SCATTER, PassMode::DENOISED, "Volume Scatter");
+    add_auto_pass(scene, PASS_VOLUME_TRANSMIT);
+    add_auto_pass(scene, PASS_VOLUME_TRANSMIT, PassMode::DENOISED, "Volume Transmit");
+    if (!Pass::contains(scene->passes, PASS_SAMPLE_COUNT)) {
+      add_auto_pass(scene, PASS_SAMPLE_COUNT);
+    }
+    if (!Pass::contains(scene->passes, PASS_VOLUME_MAJORANT)) {
+      add_auto_pass(scene, PASS_VOLUME_MAJORANT, "Volume Majorant");
+    }
+    add_auto_pass(scene, PASS_VOLUME_MAJORANT_SAMPLE_COUNT);
   }
 
   /* Remove duplicates and initialize internal pass info. */
@@ -595,10 +640,10 @@ void Film::update_passes(Scene *scene, bool add_sample_count_pass)
   tag_modified();
 
   /* Debug logging. */
-  if (VLOG_INFO_IS_ON) {
-    VLOG_INFO << "Effective scene passes:";
+  if (LOG_IS_ON(LOG_LEVEL_INFO)) {
+    LOG_INFO << "Effective scene passes:";
     for (const Pass *pass : scene->passes) {
-      VLOG_INFO << "- " << *pass;
+      LOG_INFO << "- " << *pass;
     }
   }
 }
@@ -665,8 +710,9 @@ void Film::finalize_passes(Scene *scene, const bool use_denoise)
 
     /* Disable denoising on passes if denoising is disabled, or if the
      * pass does not support it. */
-    pass->set_mode((use_denoise && pass->get_info().support_denoise) ? pass->get_mode() :
-                                                                       PassMode::NOISY);
+    const bool need_denoise = pass->get_info().support_denoise &&
+                              (use_denoise || is_volume_guiding_pass(pass->get_type()));
+    pass->set_mode(need_denoise ? pass->get_mode() : PassMode::NOISY);
 
     /* Merge duplicate passes. */
     bool duplicate_found = false;
@@ -698,7 +744,7 @@ void Film::finalize_passes(Scene *scene, const bool use_denoise)
     }
   }
 
-  /* Order from by components and type, This is required to for AOVs and cryptomatte passes,
+  /* Order from by components and type, This is required for AOVs and cryptomatte passes,
    * which the kernel assumes to be in order. Note this must use stable sort so cryptomatte
    * passes remain in the right order. */
   new_passes.stable_sort(compare_pass_order);
@@ -718,13 +764,16 @@ uint Film::get_kernel_features(const Scene *scene) const
     const PassType pass_type = pass->get_type();
     const PassMode pass_mode = pass->get_mode();
 
-    if (pass_mode == PassMode::DENOISED || pass_type == PASS_DENOISING_NORMAL ||
+    const bool has_denoise_pass = (pass_mode == PassMode::DENOISED) &&
+                                  !is_volume_guiding_pass(pass_type);
+
+    if (has_denoise_pass || pass_type == PASS_DENOISING_NORMAL ||
         pass_type == PASS_DENOISING_ALBEDO || pass_type == PASS_DENOISING_DEPTH)
     {
       kernel_features |= KERNEL_FEATURE_DENOISING;
     }
 
-    if (pass_type >= PASS_DIFFUSE && pass_type <= PASS_VOLUME_INDIRECT) {
+    if (pass_type >= PASS_DIFFUSE && pass_type <= PASS_VOLUME_TRANSMIT) {
       kernel_features |= KERNEL_FEATURE_LIGHT_PASSES;
     }
 

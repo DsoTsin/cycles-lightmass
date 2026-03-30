@@ -5,6 +5,7 @@
 #ifdef WITH_HIP
 
 #  include "device/graphics_interop.h"
+#  include "session/display_driver.h"
 
 #  ifdef WITH_HIP_DYNLOAD
 #    include "hipew.h"
@@ -27,7 +28,7 @@ class HIPDeviceGraphicsInterop : public DeviceGraphicsInterop {
   HIPDeviceGraphicsInterop &operator=(const HIPDeviceGraphicsInterop &other) = delete;
   HIPDeviceGraphicsInterop &operator=(HIPDeviceGraphicsInterop &&other) = delete;
 
-  void set_display_interop(const DisplayDriver::GraphicsInterop &display_interop) override;
+  void set_buffer(GraphicsInteropBuffer &interop_buffer) override;
 
   device_ptr map() override;
   void unmap() override;
@@ -36,15 +37,16 @@ class HIPDeviceGraphicsInterop : public DeviceGraphicsInterop {
   HIPDeviceQueue *queue_ = nullptr;
   HIPDevice *device_ = nullptr;
 
-  /* OpenGL PBO which is currently registered as the destination for the HIP buffer. */
-  int64_t opengl_pbo_id_ = 0;
-  /* Buffer area in pixels of the corresponding PBO. */
-  int64_t buffer_area_ = 0;
+  /* Size of the buffer in bytes. */
+  size_t buffer_size_ = 0;
 
   /* The destination was requested to be cleared. */
-  bool need_clear_ = false;
+  bool need_zero_ = false;
 
   hipGraphicsResource hip_graphics_resource_ = nullptr;
+  hipDeviceptr_t hip_external_memory_ptr_ = 0;
+
+  void free();
 };
 
 CCL_NAMESPACE_END

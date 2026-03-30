@@ -148,7 +148,9 @@ if(WIN32 AND MSVC AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   # such as in `svm.h`.
   # This flag is supported starting with MSVC 17.7 preview 3:
   # https://learn.microsoft.com/en-us/cpp/build/reference/jump-table-rdata
-  if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 19.37.32820)
+  # This is an x64 specific optimization.
+  if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 19.37.32820
+     AND CMAKE_SYSTEM_PROCESSOR STREQUAL "AMD64")
     string(APPEND CMAKE_CXX_FLAGS " /jumptablerdata")
   endif()
 elseif(CMAKE_COMPILER_IS_GNUCC OR (CMAKE_CXX_COMPILER_ID MATCHES "Clang"))
@@ -263,7 +265,7 @@ if(WITH_CYCLES_DEVICE_HIP)
 endif()
 
 if(WITH_CYCLES_DEVICE_OPTIX)
-  find_package(OptiX 7.3.0)
+  find_package(OptiX 8.0.0)
 
   if(OPTIX_FOUND)
     add_definitions(-DWITH_OPTIX)
@@ -287,7 +289,23 @@ endif()
 if(WITH_CYCLES_EMBREE)
   add_definitions(-DWITH_EMBREE)
   if(WITH_CYCLES_DEVICE_ONEAPI AND EMBREE_SYCL_SUPPORT)
-    add_definitions(-DWITH_EMBREE_GPU)
+    # NOTE: The debug version of Embree is built without SYCL support on Windows
+    # since 7fb480095e371f8f5ac4f647f0ba2fd78da486f7. This is not reflected in
+    # EMBREE_SYCL_SUPPORT which is coming from Embree headers that aren't
+    # differentiated for release and debug, so we handle this case here by
+    # disabling its use when embree4_sycl_d.lib doesn't exist.
+    set(EMBREE_SYCL_DEBUG_LIBRARY ${EMBREE_LIBRARIES})
+    list(FILTER EMBREE_SYCL_DEBUG_LIBRARY INCLUDE REGEX "_sycl_d\\.lib$")
+    if(WIN32 AND NOT EMBREE_SYCL_DEBUG_LIBRARY)
+      add_compile_definitions("$<$<CONFIG:Release>:WITH_EMBREE_GPU>")
+      add_compile_definitions("$<$<CONFIG:RelWithDebInfo>:WITH_EMBREE_GPU>")
+      add_compile_definitions("$<$<CONFIG:MinSizeRel>:WITH_EMBREE_GPU>")
+      if(CMAKE_BUILD_TYPE MATCHES "Debug" OR GENERATOR_IS_MULTI_CONFIG)
+        message(STATUS "The use of Embree GPU is disabled for the Debug configuration as embree${EMBREE_MAJOR_VERSION}_sycl_d.lib is not found.")
+      endif()
+    else()
+      add_definitions(-DWITH_EMBREE_GPU)
+    endif()
   endif()
   add_definitions(-DEMBREE_MAJOR_VERSION=${EMBREE_MAJOR_VERSION})
   include_directories(
@@ -301,26 +319,6 @@ if(WITH_OPENIMAGEDENOISE)
   include_directories(
     SYSTEM
     ${OPENIMAGEDENOISE_INCLUDE_DIRS}
-  )
-endif()
-
-# Logging capabilities using GLog library.
-if(WITH_CYCLES_LOGGING)
-  add_definitions(-DWITH_CYCLES_LOGGING)
-  add_definitions(${GLOG_DEFINES})
-  add_definitions(-DCYCLES_GFLAGS_NAMESPACE=${GFLAGS_NAMESPACE})
-  include_directories(
-    SYSTEM
-    ${GLOG_INCLUDE_DIRS}
-    ${GFLAGS_INCLUDE_DIRS}
-  )
-endif()
-
-if(WITH_ALEMBIC)
-  add_definitions(-DWITH_ALEMBIC)
-  include_directories(
-    SYSTEM
-    ${ALEMBIC_INCLUDE_DIRS}
   )
 endif()
 

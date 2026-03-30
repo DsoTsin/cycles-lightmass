@@ -27,28 +27,40 @@ ccl_device_noinline void svm_node_enter_bump_eval(KernelGlobals kg,
   stack_store_float3(stack, offset + 0, sd->P);
   stack_store_float(stack, offset + 3, sd->dP);
 
-  /* set state as if undisplaced */
-  const AttributeDescriptor desc = find_attribute(kg, sd, ATTR_STD_POSITION_UNDISPLACED);
+  /* This is a loop to work around a Metal compiler issue, this way we can have
+   * a single find_attribute and primitive_surface_attribute call. */
+  AttributeStandard std[2] = {ATTR_STD_POSITION_UNDISPLACED, ATTR_STD_NORMAL_UNDISPLACED};
+  for (int i = 0; i < 2; i++) {
+    const AttributeDescriptor desc = find_attribute(kg, sd, std[i]);
+    if (desc.offset == ATTR_STD_NOT_FOUND) {
+      continue;
+    }
 
-  if (desc.offset != ATTR_STD_NOT_FOUND) {
-    differential3 dP;
-    float3 P = primitive_surface_attribute<float3>(kg, sd, desc, &dP.dx, &dP.dy);
+    dual3 attr = primitive_surface_attribute<float3>(kg, sd, desc, true, true);
 
-    object_position_transform(kg, sd, &P);
-    object_dir_transform(kg, sd, &dP.dx);
-    object_dir_transform(kg, sd, &dP.dy);
+    if (std[i] == ATTR_STD_NORMAL_UNDISPLACED) {
+      /* Set normal as if undisplaced.
+       * Note this does not need to be restored, because the bump evaluation will
+       * write to sd->N. */
+      float3 N = safe_normalize(attr.val);
+      object_normal_transform(kg, sd, &N);
+      sd->N = (sd->flag & SD_BACKFACING) ? -N : N;
+    }
+    else {
+      /* Set position as if undisplaced. */
+      object_position_transform(kg, sd, &attr);
 
-    sd->P = P;
-    sd->dP = differential_make_compact(dP);
+      sd->P = attr.val;
+      sd->dP = differential_make_compact(attr);
 
-    /* Save the full differential, the compact form isn't enough for svm_node_set_bump. */
-    stack_store_float3(stack, offset + 4, dP.dx);
-    stack_store_float3(stack, offset + 7, dP.dy);
+      /* Save the full differential, the compact form isn't enough for svm_node_set_bump. */
+      stack_store_float3(stack, offset + 4, attr.dx);
+      stack_store_float3(stack, offset + 7, attr.dy);
+    }
   }
 }
 
-ccl_device_noinline void svm_node_leave_bump_eval(KernelGlobals kg,
-                                                  ccl_private ShaderData *sd,
+ccl_device_noinline void svm_node_leave_bump_eval(ccl_private ShaderData *sd,
                                                   ccl_private float *stack,
                                                   const uint offset)
 {

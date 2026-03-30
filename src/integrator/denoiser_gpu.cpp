@@ -54,7 +54,7 @@ bool DenoiserGPU::denoise_buffer(const BufferParams &buffer_params,
     task.render_buffers = render_buffers;
   }
   else {
-    VLOG_WORK << "Creating temporary buffer on denoiser device.";
+    LOG_DEBUG << "Creating temporary buffer on denoiser device.";
 
     /* Create buffer which is available by the device used by denoiser. */
 
@@ -103,7 +103,7 @@ bool DenoiserGPU::denoise_buffer(const DenoiseTask &task)
   }
 
   if (!denoise_filter_guiding_preprocess(context)) {
-    LOG(ERROR) << "Error preprocessing guiding passes.";
+    LOG_ERROR << "Error preprocessing guiding passes.";
     return false;
   }
 
@@ -120,12 +120,12 @@ bool DenoiserGPU::denoise_buffer(const DenoiseTask &task)
 bool DenoiserGPU::denoise_ensure(DenoiseContext &context)
 {
   if (!denoise_create_if_needed(context)) {
-    LOG(ERROR) << "GPU denoiser creation has failed.";
+    LOG_ERROR << "GPU denoiser creation has failed.";
     return false;
   }
 
   if (!denoise_configure_if_needed(context)) {
-    LOG(ERROR) << "GPU denoiser configuration has failed.";
+    LOG_ERROR << "GPU denoiser configuration has failed.";
     return false;
   }
 
@@ -259,6 +259,12 @@ bool DenoiserGPU::denoise_filter_color_postprocess(const DenoiseContext &context
 bool DenoiserGPU::denoise_filter_color_preprocess(const DenoiseContext &context,
                                                   const DenoisePass &pass)
 {
+  if (context.denoise_params.type != DENOISER_OPTIX) {
+    /* Pass preprocessing is used to clamp values for the OptiX denoiser.
+     * Clamping is not necessary for other denoisers, so just skip this preprocess step. */
+    return true;
+  }
+
   const BufferParams &buffer_params = context.buffer_params;
 
   const int work_size = buffer_params.width * buffer_params.height;
@@ -310,7 +316,7 @@ void DenoiserGPU::denoise_color_read(const DenoiseContext &context, const Denois
   const PassAccessorGPU pass_accessor(
       denoiser_queue_.get(), pass_access_info, 1.0f, context.num_samples);
 
-  PassAccessor::Destination destination(pass_access_info.type);
+  PassAccessor::Destination destination(pass_access_info.type, pass_access_info.mode);
   destination.d_pixels = context.render_buffers->buffer.device_pointer;
   destination.num_components = 3;
   destination.pixel_offset = pass.denoised_offset;
@@ -335,20 +341,20 @@ void DenoiserGPU::denoise_pass(DenoiseContext &context, PassType pass_type)
     return;
   }
   if (pass.denoised_offset == PASS_UNUSED) {
-    LOG(DFATAL) << "Missing denoised pass " << pass_type_as_string(pass_type);
+    LOG_DFATAL << "Missing denoised pass " << pass_type_as_string(pass_type);
     return;
   }
 
   if (pass.use_denoising_albedo) {
     if (context.albedo_replaced_with_fake) {
-      LOG(ERROR) << "Pass which requires albedo is denoised after fake albedo has been set.";
+      LOG_ERROR << "Pass which requires albedo is denoised after fake albedo has been set.";
       return;
     }
   }
   else if (context.use_guiding_passes && !context.albedo_replaced_with_fake) {
     context.albedo_replaced_with_fake = true;
     if (!denoise_filter_guiding_set_fake_albedo(context)) {
-      LOG(ERROR) << "Error replacing real albedo with the fake one.";
+      LOG_ERROR << "Error replacing real albedo with the fake one.";
       return;
     }
   }
@@ -356,12 +362,12 @@ void DenoiserGPU::denoise_pass(DenoiseContext &context, PassType pass_type)
   /* Read and preprocess noisy color input pass. */
   denoise_color_read(context, pass);
   if (!denoise_filter_color_preprocess(context, pass)) {
-    LOG(ERROR) << "Error converting denoising passes to RGB buffer.";
+    LOG_ERROR << "Error converting denoising passes to RGB buffer.";
     return;
   }
 
   if (!denoise_run(context, pass)) {
-    LOG(ERROR) << "Error running denoiser.";
+    LOG_ERROR << "Error running denoiser.";
     return;
   }
 
@@ -369,7 +375,7 @@ void DenoiserGPU::denoise_pass(DenoiseContext &context, PassType pass_type)
    *
    * This will scale the denoiser result up to match the number of, possibly per-pixel, samples. */
   if (!denoise_filter_color_postprocess(context, pass)) {
-    LOG(ERROR) << "Error copying denoiser result to the denoised pass.";
+    LOG_ERROR << "Error copying denoiser result to the denoised pass.";
     return;
   }
 

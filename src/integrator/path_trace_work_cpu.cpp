@@ -20,6 +20,7 @@
 #include "session/buffers.h"
 
 #include "util/tbb.h"
+#include "util/time.h"
 
 CCL_NAMESPACE_BEGIN
 
@@ -128,6 +129,8 @@ void PathTraceWorkCPU::render_samples_full_pipeline(ThreadKernelGlobalsCPU *kern
   KernelWorkTile sample_work_tile = work_tile;
   float *render_buffer = buffers_->buffer.data();
 
+  fast_timer render_timer;
+
   for (int sample = 0; sample < samples_num; ++sample) {
     if (is_cancel_requested()) {
       break;
@@ -148,19 +151,40 @@ void PathTraceWorkCPU::render_samples_full_pipeline(ThreadKernelGlobalsCPU *kern
       }
     }
 
-    kernels_.integrator_megakernel(kernel_globals, state, render_buffer);
-
-#ifdef WITH_PATH_GUIDING
+#if defined(WITH_PATH_GUIDING)
     if (kernel_globals->data.integrator.train_guiding) {
+      assert(kernel_globals->opgl_path_segment_storage);
+      assert(kernel_globals->opgl_path_segment_storage->GetNumSegments() == 0);
+
+      kernels_.integrator_megakernel(kernel_globals, state, render_buffer);
+
       /* Push the generated sample data to the global sample data storage. */
       guiding_push_sample_data_to_global_storage(kernel_globals, state, render_buffer);
+
+      /* No training for shadow catcher paths. */
+      if (shadow_catcher_state) {
+        kernel_globals->data.integrator.train_guiding = false;
+        kernels_.integrator_megakernel(kernel_globals, shadow_catcher_state, render_buffer);
+        kernel_globals->data.integrator.train_guiding = true;
+      }
     }
+    else
 #endif
-
-    if (shadow_catcher_state) {
-      kernels_.integrator_megakernel(kernel_globals, shadow_catcher_state, render_buffer);
+    {
+      kernels_.integrator_megakernel(kernel_globals, state, render_buffer);
+      if (shadow_catcher_state) {
+        kernels_.integrator_megakernel(kernel_globals, shadow_catcher_state, render_buffer);
+      }
     }
 
+    if (kernel_globals->data.film.pass_render_time != PASS_UNUSED) {
+      uint64_t time;
+      if (render_timer.lap(time)) {
+        ccl_global float *buffer = render_buffer + (uint64_t)state->path.render_pixel_index *
+                                                       kernel_globals->data.film.pass_stride;
+        *(buffer + kernel_globals->data.film.pass_render_time) += float(time);
+      }
+    }
     ++sample_work_tile.start_sample;
   }
 }
@@ -185,7 +209,7 @@ void PathTraceWorkCPU::copy_to_display(PathTraceDisplay *display,
 
   const PassAccessorCPU pass_accessor(pass_access_info, kfilm.exposure, num_samples);
 
-  PassAccessor::Destination destination = get_display_destination_template(display);
+  PassAccessor::Destination destination = get_display_destination_template(display, pass_mode);
   destination.pixels_half_rgba = rgba_half;
 
   tbb::task_arena local_arena = local_tbb_arena_create(device_);
@@ -291,7 +315,46 @@ void PathTraceWorkCPU::cryptomatte_postproces()
   });
 }
 
-#ifdef WITH_PATH_GUIDING
+void PathTraceWorkCPU::denoise_volume_guiding_buffers()
+{
+  const int min_x = effective_buffer_params_.full_x;
+  const int min_y = effective_buffer_params_.full_y;
+  const int max_x = effective_buffer_params_.width + min_x;
+  const int max_y = effective_buffer_params_.height + min_y;
+  const int offset = effective_buffer_params_.offset;
+  const int stride = effective_buffer_params_.stride;
+
+  float *render_buffer = buffers_->buffer.data();
+
+  tbb::task_arena local_arena = local_tbb_arena_create(device_);
+
+  const blocked_range2d<int> range(min_x, max_x, min_y, max_y);
+
+  /* Filter in x direction. */
+  local_arena.execute([&]() {
+    parallel_for(range, [&](const blocked_range2d<int> r) {
+      ThreadKernelGlobalsCPU *kernel_globals = kernel_thread_globals_.data();
+      for (int y = r.cols().begin(); y < r.cols().end(); ++y) {
+        for (int x = r.rows().begin(); x < r.rows().end(); ++x) {
+          kernels_.volume_guiding_filter_x(
+              kernel_globals, render_buffer, y, x, min_x, max_x, offset, stride);
+        }
+      }
+    });
+  });
+
+  /* Filter in y direction. Unlike `filter_x`, the inner loop of `filter_y` is serially run inside
+   * the kernel, to avoid the need of intermediate buffers. */
+  local_arena.execute([&]() {
+    parallel_for(min_x, max_x, [&](int x) {
+      ThreadKernelGlobalsCPU *kernel_globals = kernel_thread_globals_.data();
+      kernels_.volume_guiding_filter_y(
+          kernel_globals, render_buffer, x, min_y, max_y, offset, stride);
+    });
+  });
+}
+
+#if defined(WITH_PATH_GUIDING)
 /* NOTE: It seems that this is called before every rendering iteration/progression and not once per
  * rendering. May be we find a way to call it only once per rendering. */
 void PathTraceWorkCPU::guiding_init_kernel_globals(void *guiding_field,
@@ -341,11 +404,11 @@ void PathTraceWorkCPU::guiding_push_sample_data_to_global_storage(ThreadKernelGl
                                                                       render_buffer)
 {
 #  ifdef WITH_CYCLES_DEBUG
-  if (VLOG_WORK_IS_ON) {
+  if (LOG_IS_ON(LOG_LEVEL_DEBUG)) {
     /* Check if the generated path segments contain valid values. */
     const bool validSegments = kg->opgl_path_segment_storage->ValidateSegments();
     if (!validSegments) {
-      VLOG_WORK << "Guiding: invalid path segments!";
+      LOG_DEBUG << "Guiding: invalid path segments!";
     }
   }
 
@@ -370,10 +433,10 @@ void PathTraceWorkCPU::guiding_push_sample_data_to_global_storage(ThreadKernelGl
 
 #  ifdef WITH_CYCLES_DEBUG
   /* Check if the training/radiance samples generated by the path segment storage are valid. */
-  if (VLOG_WORK_IS_ON) {
+  if (LOG_IS_ON(LOG_LEVEL_DEBUG)) {
     const bool validSamples = kg->opgl_path_segment_storage->ValidateSamples();
     if (!validSamples) {
-      VLOG_WORK
+      LOG_DEBUG
           << "Guiding: path segment storage generated/contains invalid radiance/training samples!";
     }
   }

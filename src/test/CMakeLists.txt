@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-if(WITH_GTESTS AND WITH_CYCLES_LOGGING)
+if(WITH_GTESTS)
   # Otherwise we get warnings here that we can't fix in external projects
   remove_strict_flags()
 endif()
@@ -37,6 +37,9 @@ set(SRC
   util_ies_test.cpp
   util_math_test.cpp
   util_math_fast_test.cpp
+  util_math_float3_test.cpp
+  util_math_float4_test.cpp
+  util_rgbe_test.cpp
   util_md5_test.cpp
   util_path_test.cpp
   util_string_test.cpp
@@ -56,7 +59,7 @@ if(NOT APPLE)
   endif()
 endif()
 
-if(WITH_GTESTS AND WITH_CYCLES_LOGGING)
+if(WITH_GTESTS)
   set(INC_SYS )
   blender_add_test_suite_executable(cycles "${SRC}" "${INC}" "${INC_SYS}" "${LIB}")
 endif()

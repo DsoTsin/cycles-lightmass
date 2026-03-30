@@ -22,6 +22,7 @@ CCL_NAMESPACE_BEGIN
 enum ShaderNodeType {
 #define SHADER_NODE_TYPE(name) name,
 #include "node_types_template.h"
+
   NODE_NUM
 };
 
@@ -101,6 +102,7 @@ enum NodeLightPath {
   NODE_LP_ray_glossy,
   NODE_LP_ray_transparent,
   NODE_LP_ray_transmission,
+  NODE_LP_ray_portal,
 };
 
 enum NodeLightFalloff {
@@ -219,6 +221,8 @@ enum NodeVectorMathType {
   NODE_VECTOR_MATH_REFRACT,
   NODE_VECTOR_MATH_FACEFORWARD,
   NODE_VECTOR_MATH_MULTIPLY_ADD,
+  NODE_VECTOR_MATH_POWER,
+  NODE_VECTOR_MATH_SIGN,
 };
 
 enum NodeClampType {
@@ -306,7 +310,12 @@ enum NodeWaveProfile {
   NODE_WAVE_PROFILE_TRI,
 };
 
-enum NodeSkyType { NODE_SKY_PREETHAM, NODE_SKY_HOSEK, NODE_SKY_NISHITA };
+enum NodeSkyType {
+  NODE_SKY_PREETHAM,
+  NODE_SKY_HOSEK,
+  NODE_SKY_SINGLE_SCATTERING,
+  NODE_SKY_MULTIPLE_SCATTERING
+};
 
 enum NodeGradientType {
   NODE_BLEND_LINEAR,
@@ -368,11 +377,6 @@ enum NodeBumpOffset {
   NODE_BUMP_OFFSET_CENTER,
   NODE_BUMP_OFFSET_DX,
   NODE_BUMP_OFFSET_DY,
-};
-
-enum NodeTexVoxelSpace {
-  NODE_TEX_VOXEL_SPACE_OBJECT = 0,
-  NODE_TEX_VOXEL_SPACE_WORLD = 1,
 };
 
 enum NodeAO {
@@ -474,6 +478,8 @@ enum ClosureType {
   NBUILTIN_CLOSURES
 };
 
+static_assert(NBUILTIN_CLOSURES < 256, "Too many Closure types (need to change SVM packing)");
+
 /* watch this, being lazy with memory usage */
 #define CLOSURE_IS_BSDF(type) (type != CLOSURE_NONE_ID && type <= CLOSURE_BSDF_TRANSPARENT_ID)
 #define CLOSURE_IS_BSDF_DIFFUSE(type) \
@@ -519,5 +525,6 @@ enum ClosureType {
 #define CLOSURE_WEIGHT_CUTOFF 1e-5f
 /* Treat closure as singular if the squared roughness is below this threshold. */
 #define BSDF_ROUGHNESS_SQ_THRESH 2e-10f
+#define THINFILM_THICKNESS_CUTOFF 0.1f
 
 CCL_NAMESPACE_END

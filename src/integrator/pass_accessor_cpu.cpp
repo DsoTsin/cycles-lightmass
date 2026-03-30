@@ -8,6 +8,7 @@
 
 #include "session/buffers.h"
 
+#include "util/log.h"
 #include "util/tbb.h"
 
 #include "kernel/types.h"
@@ -42,7 +43,7 @@ inline void PassAccessorCPU::run_get_pass_kernel_processor_float(
   parallel_for(0, buffer_params.window_height, [&](int64_t y) {
     const float *buffer = window_data + y * buffer_row_stride;
     float *pixel = destination.pixels + destination.pixel_offset +
-                   (y * buffer_params.width + destination.offset) * pixel_stride;
+                   (y * buffer_params.window_width + destination.offset) * pixel_stride;
     func(kfilm_convert, buffer, pixel, buffer_params.window_width, pass_stride, pixel_stride);
   });
 }
@@ -62,7 +63,7 @@ inline void PassAccessorCPU::run_get_pass_kernel_processor_half_rgba(
 
   half4 *dst_start = destination.pixels_half_rgba + destination.offset;
   const int destination_stride = destination.stride != 0 ? destination.stride :
-                                                           buffer_params.width;
+                                                           buffer_params.window_width;
 
   parallel_for(0, buffer_params.window_height, [&](int64_t y) {
     const float *buffer = window_data + y * buffer_row_stride;
@@ -104,12 +105,14 @@ inline void PassAccessorCPU::run_get_pass_kernel_processor_half_rgba(
 /* Float (scalar) passes. */
 DEFINE_PASS_ACCESSOR(depth)
 DEFINE_PASS_ACCESSOR(mist)
+DEFINE_PASS_ACCESSOR(volume_majorant)
 DEFINE_PASS_ACCESSOR(sample_count)
 DEFINE_PASS_ACCESSOR(float)
 
 /* Float3 passes. */
 DEFINE_PASS_ACCESSOR(light_path)
 DEFINE_PASS_ACCESSOR(shadow_catcher)
+DEFINE_PASS_ACCESSOR(rgbe)
 DEFINE_PASS_ACCESSOR(float3)
 
 /* Float4 passes. */

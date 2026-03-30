@@ -12,16 +12,15 @@ struct RayPayload {
   float ray_time;
 };
 
-struct ShadowPayload {
-  /* Some ray types might use the same intersection function for regular and shadow intersections,
-   * but have different filter functions for them. To make this code simpler essentially subclass
-   * from RayPayload, but let compiler to possibly shuffle things inside of the payload struct if
-   * it decides it helps performance. */
-  RayPayload ray;
-
+/* Some ray types might use the same intersection function for regular and shadow intersections,
+ * but have different filter functions for them. To make this code simpler subclass from
+ * RayPayload.
+ *
+ * NOTE: This assumes that reinterpret_cast from void pointer to RayPayload works correctly. */
+struct ShadowPayload : RayPayload {
   int in_state;
-  uint max_hits;
-  uint num_hits;
+  uint max_transparent_hits;
+  uint num_transparent_hits;
   uint *r_num_recorded_hits;
   float *r_throughput;
 };
@@ -104,11 +103,11 @@ ccl_device_inline bool curve_custom_intersect(const hiprtRay &ray,
 
   const int object_id = kernel_data_fetch(user_instance_id, hit.instanceID);
 
-  /* data_offset.x: where the data (prim id, type )for the geometry of the current object begins
+  /* `data_offset.x`: where the data (prim id, type )for the geometry of the current object begins
    * the prim_id that is in hiprtHit hit is local to the particular geometry so we add the above
-   * ofstream to map prim id in hiprtHit to the one compatible to what next stage expects
-   * data_offset.y: the offset that has to be added to a local primitive to get the global
-   * primitive id = kernel_data_fetch(object_prim_offset, object_id); */
+   * `ofstream` to map prim id in hiprtHit to the one compatible to what next stage expects
+   * `data_offset.y`: the offset that has to be added to a local primitive to get the global
+   * `primitive id = kernel_data_fetch(object_prim_offset, object_id);` */
   const int2 data_offset = kernel_data_fetch(custom_prim_info_offset, object_id);
 
   const int prim_offset = data_offset.y;
@@ -224,7 +223,6 @@ ccl_device_inline bool motion_triangle_custom_local_intersect(const hiprtRay &ra
                                          payload->ray_time,
                                          object_id,
                                          prim_id_global,
-                                         prim_id_local,
                                          ray.minT,
                                          ray.maxT,
                                          payload->lcg_state,
@@ -379,12 +377,12 @@ ccl_device_inline bool shadow_intersection_filter(const hiprtRay &ray,
                                                   const hiprtHit &hit)
 
 {
-  KernelGlobals kg = payload->ray.kg;
+  KernelGlobals kg = payload->kg;
 
-  const uint num_hits = payload->num_hits;
-  const uint max_hits = payload->max_hits;
+  uint num_transparent_hits = payload->num_transparent_hits;
+  const uint max_transparent_hits = payload->max_transparent_hits;
   const int state = payload->in_state;
-  const RaySelfPrimitives &self = payload->ray.self;
+  const RaySelfPrimitives &self = payload->self;
 
   const int object = kernel_data_fetch(user_instance_id, hit.instanceID);
   const int prim_offset = kernel_data_fetch(object_prim_offset, object);
@@ -399,7 +397,7 @@ ccl_device_inline bool shadow_intersection_filter(const hiprtRay &ray,
 #  endif
 
 #  ifdef __VISIBILITY_FLAG__
-  if ((kernel_data_fetch(objects, object).visibility & payload->ray.visibility) == 0) {
+  if ((kernel_data_fetch(objects, object).visibility & payload->visibility) == 0) {
     return true; /* No hit - continue traversal. */
   }
 #  endif
@@ -408,7 +406,8 @@ ccl_device_inline bool shadow_intersection_filter(const hiprtRay &ray,
     return true; /* No hit -continue traversal. */
   }
 
-  if (intersection_skip_shadow_already_recoded(kg, state, object, prim, num_hits)) {
+  if (intersection_skip_shadow_already_recoded(state, object, prim, *payload->r_num_recorded_hits))
+  {
     return true;
   }
 
@@ -419,18 +418,22 @@ ccl_device_inline bool shadow_intersection_filter(const hiprtRay &ray,
 #  ifndef __TRANSPARENT_SHADOWS__
   return false;
 #  else
-  if (num_hits >= max_hits ||
-      !(intersection_get_shader_flags(kg, prim, primitive_type) & SD_HAS_TRANSPARENT_SHADOW))
-  {
+  const int flags = intersection_get_shader_flags(kg, prim, primitive_type);
+  if (!(flags & SD_HAS_TRANSPARENT_SHADOW)) {
+    return false;
+  }
+
+  num_transparent_hits += !(flags & SD_HAS_ONLY_VOLUME);
+  if (num_transparent_hits > max_transparent_hits) {
     return false;
   }
 
   uint record_index = *payload->r_num_recorded_hits;
 
-  payload->num_hits = num_hits + 1;
+  payload->num_transparent_hits = num_transparent_hits;
   *(payload->r_num_recorded_hits) += 1;
 
-  const uint max_record_hits = min(max_hits, INTEGRATOR_SHADOW_ISECT_SIZE);
+  const uint max_record_hits = INTEGRATOR_SHADOW_ISECT_SIZE;
   if (record_index >= max_record_hits) {
     float max_recorded_t = INTEGRATOR_STATE_ARRAY(state, shadow_isect, 0, t);
     uint max_recorded_hit = 0;
@@ -466,12 +469,12 @@ ccl_device_inline bool shadow_intersection_filter_curves(const hiprtRay &ray,
                                                          const hiprtHit &hit)
 
 {
-  KernelGlobals kg = payload->ray.kg;
+  KernelGlobals kg = payload->kg;
 
-  const uint num_hits = payload->num_hits;
+  uint num_transparent_hits = payload->num_transparent_hits;
   const uint num_recorded_hits = *(payload->r_num_recorded_hits);
-  const uint max_hits = payload->max_hits;
-  const RaySelfPrimitives &self = payload->ray.self;
+  const uint max_transparent_hits = payload->max_transparent_hits;
+  const RaySelfPrimitives &self = payload->self;
 
   const int object = kernel_data_fetch(user_instance_id, hit.instanceID);
   const int prim = hit.primID;
@@ -486,7 +489,7 @@ ccl_device_inline bool shadow_intersection_filter_curves(const hiprtRay &ray,
 #  endif
 
 #  ifdef __VISIBILITY_FLAG__
-  if ((kernel_data_fetch(objects, object).visibility & payload->ray.visibility) == 0) {
+  if ((kernel_data_fetch(objects, object).visibility & payload->visibility) == 0) {
     return true; /* No hit - continue traversal. */
   }
 #  endif
@@ -495,7 +498,9 @@ ccl_device_inline bool shadow_intersection_filter_curves(const hiprtRay &ray,
     return true; /* No hit -continue traversal. */
   }
 
-  if (intersection_skip_shadow_already_recoded(kg, payload->in_state, object, prim, num_hits)) {
+  /* FIXME: transparent curves are not recorded, this check doesn't work. */
+  if (intersection_skip_shadow_already_recoded(payload->in_state, object, prim, num_recorded_hits))
+  {
     return true;
   }
 
@@ -506,21 +511,25 @@ ccl_device_inline bool shadow_intersection_filter_curves(const hiprtRay &ray,
     return true; /* Continue traversal. */
   }
 
-  const int primitive_type = payload->ray.prim_type;
+  const int primitive_type = payload->prim_type;
 
 #  ifndef __TRANSPARENT_SHADOWS__
   return false;
 #  else
-  if (num_hits >= max_hits ||
-      !(intersection_get_shader_flags(kg, prim, primitive_type) & SD_HAS_TRANSPARENT_SHADOW))
-  {
+  const int flags = intersection_get_shader_flags(kg, prim, primitive_type);
+  if (!(flags & SD_HAS_TRANSPARENT_SHADOW)) {
+    return false;
+  }
+
+  num_transparent_hits += !(flags & SD_HAS_ONLY_VOLUME);
+  if (num_transparent_hits > max_transparent_hits) {
     return false;
   }
 
   float throughput = *payload->r_throughput;
   throughput *= intersection_curve_shadow_transparency(kg, object, prim, primitive_type, u);
   *payload->r_throughput = throughput;
-  payload->num_hits += 1;
+  payload->num_transparent_hits = num_transparent_hits;
 
   if (throughput < CURVE_SHADOW_TRANSPARENCY_CUTOFF) {
     return false;
@@ -614,21 +623,18 @@ HIPRT_DEVICE bool intersectFunc(const uint geom_type,
   const uint index = tableHeader.numGeomTypes * ray_type + geom_type;
   switch (index) {
     case Curve_Intersect_Function:
-      return curve_custom_intersect(ray, (RayPayload *)payload, hit);
     case Curve_Intersect_Shadow:
-      return curve_custom_intersect(ray, &((ShadowPayload *)payload)->ray, hit);
+      return curve_custom_intersect(ray, (RayPayload *)payload, hit);
     case Motion_Triangle_Intersect_Function:
-      return motion_triangle_custom_intersect(ray, (RayPayload *)payload, hit);
     case Motion_Triangle_Intersect_Shadow:
-      return motion_triangle_custom_intersect(ray, &((ShadowPayload *)payload)->ray, hit);
+      return motion_triangle_custom_intersect(ray, (RayPayload *)payload, hit);
     case Motion_Triangle_Intersect_Local:
       return motion_triangle_custom_local_intersect(ray, (LocalPayload *)payload, hit);
     case Motion_Triangle_Intersect_Volume:
       return motion_triangle_custom_volume_intersect(ray, (RayPayload *)payload, hit);
     case Point_Intersect_Function:
-      return point_custom_intersect(ray, (RayPayload *)payload, hit);
     case Point_Intersect_Shadow:
-      return point_custom_intersect(ray, &((ShadowPayload *)payload)->ray, hit);
+      return point_custom_intersect(ray, (RayPayload *)payload, hit);
     default:
       break;
   }

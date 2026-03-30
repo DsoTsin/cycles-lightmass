@@ -529,9 +529,12 @@ void Hair::pack_curves(Scene *scene,
 PrimitiveType Hair::primitive_type() const
 {
   return has_motion_blur() ?
-             ((curve_shape == CURVE_RIBBON) ? PRIMITIVE_MOTION_CURVE_RIBBON :
-                                              PRIMITIVE_MOTION_CURVE_THICK) :
-             ((curve_shape == CURVE_RIBBON) ? PRIMITIVE_CURVE_RIBBON : PRIMITIVE_CURVE_THICK);
+             ((curve_shape == CURVE_RIBBON)       ? PRIMITIVE_MOTION_CURVE_RIBBON :
+              (curve_shape == CURVE_THICK_LINEAR) ? PRIMITIVE_MOTION_CURVE_THICK_LINEAR :
+                                                    PRIMITIVE_MOTION_CURVE_THICK) :
+             ((curve_shape == CURVE_RIBBON)       ? PRIMITIVE_CURVE_RIBBON :
+              (curve_shape == CURVE_THICK_LINEAR) ? PRIMITIVE_CURVE_THICK_LINEAR :
+                                                    PRIMITIVE_CURVE_THICK);
 }
 
 /* Fill in coordinates for curve transparency shader evaluation on device. */
@@ -581,6 +584,10 @@ static void read_shader_output(float *shadow_transparency,
 
 bool Hair::need_shadow_transparency()
 {
+  if (!is_traceable()) {
+    return false;
+  }
+
   for (const Node *node : used_shaders) {
     const Shader *shader = static_cast<const Shader *>(node);
     if (shader->has_surface_transparent && shader->get_use_transparent_shadow()) {

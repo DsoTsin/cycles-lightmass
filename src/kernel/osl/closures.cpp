@@ -18,9 +18,12 @@
 
 #include "kernel/globals.h"
 
+#include "kernel/geom/attribute.h"
 #include "kernel/geom/object.h"
+#include "kernel/geom/primitive.h"
 #include "kernel/util/differential.h"
 
+#include "kernel/osl/camera.h"
 #include "kernel/osl/osl.h"
 
 #define TO_VEC3(v) OSL::Vec3(v.x, v.y, v.z)
@@ -82,7 +85,7 @@ void osl_eval_nodes<SHADER_TYPE_SURFACE>(const ThreadKernelGlobalsCPU *kg,
                                          const uint32_t path_flag)
 {
   /* setup shader globals from shader data */
-  shaderdata_to_shaderglobals(kg, sd, path_flag, &kg->osl.shader_globals);
+  shaderdata_to_shaderglobals(sd, path_flag, &kg->osl.shader_globals);
 
   /* clear trace data */
   kg->osl.tracedata.init = false;
@@ -127,31 +130,28 @@ void osl_eval_nodes<SHADER_TYPE_SURFACE>(const ThreadKernelGlobalsCPU *kg,
 
       /* set state as if undisplaced */
       if (sd->flag & SD_HAS_DISPLACEMENT) {
-        float data[9];
-        const bool found = kg->osl.globals->services->get_attribute(
-            globals,
-            true,
-            OSLRenderServices::u_empty,
-            TypeVector,
-            OSLRenderServices::u_geom_undisplaced,
-            data);
-        (void)found;
-        assert(found);
+        const AttributeDescriptor desc = find_attribute(kg, sd, ATTR_STD_POSITION_UNDISPLACED);
+        kernel_assert(desc.offset != ATTR_STD_NOT_FOUND);
 
-        differential3 tmp_dP;
-        sd->P = make_float3(data[0], data[1], data[2]);
-        tmp_dP.dx = make_float3(data[3], data[4], data[5]);
-        tmp_dP.dy = make_float3(data[6], data[7], data[8]);
+        dual3 P = primitive_surface_attribute<float3>(kg, sd, desc, true, true);
+        object_position_transform(kg, sd, &P);
 
-        object_position_transform(kg, sd, &sd->P);
-        object_dir_transform(kg, sd, &tmp_dP.dx);
-        object_dir_transform(kg, sd, &tmp_dP.dy);
-
-        sd->dP = differential_make_compact(tmp_dP);
+        sd->P = P.val;
+        sd->dP = differential_make_compact(P);
 
         globals->P = TO_VEC3(sd->P);
-        globals->dPdx = TO_VEC3(tmp_dP.dx);
-        globals->dPdy = TO_VEC3(tmp_dP.dy);
+        globals->dPdx = TO_VEC3(P.dx);
+        globals->dPdy = TO_VEC3(P.dy);
+
+        /* Set normal as if undisplaced. */
+        const AttributeDescriptor ndesc = find_attribute(kg, sd, ATTR_STD_NORMAL_UNDISPLACED);
+        if (ndesc.offset != ATTR_STD_NOT_FOUND) {
+          float3 N = safe_normalize(
+              primitive_surface_attribute<float3>(kg, sd, ndesc, false, false).val);
+          object_normal_transform(kg, sd, &N);
+          sd->N = (sd->flag & SD_BACKFACING) ? -N : N;
+          globals->N = TO_VEC3(sd->N);
+        }
       }
 
       /* execute bump shader */
@@ -166,6 +166,9 @@ void osl_eval_nodes<SHADER_TYPE_SURFACE>(const ThreadKernelGlobalsCPU *kg,
       /* reset state */
       sd->P = P;
       sd->dP = dP;
+
+      /* Apply bump output to sd->N since it's used for shadow terminator logic, for example. */
+      sd->N = TO_FLOAT3(globals->N);
 
       globals->P = TO_VEC3(P);
       globals->dPdx = TO_VEC3(dPdx);
@@ -199,7 +202,7 @@ void osl_eval_nodes<SHADER_TYPE_VOLUME>(const ThreadKernelGlobalsCPU *kg,
                                         const uint32_t path_flag)
 {
   /* setup shader globals from shader data */
-  shaderdata_to_shaderglobals(kg, sd, path_flag, &kg->osl.shader_globals);
+  shaderdata_to_shaderglobals(sd, path_flag, &kg->osl.shader_globals);
 
   /* clear trace data */
   kg->osl.tracedata.init = false;
@@ -246,7 +249,7 @@ void osl_eval_nodes<SHADER_TYPE_DISPLACEMENT>(const ThreadKernelGlobalsCPU *kg,
                                               const uint32_t path_flag)
 {
   /* setup shader globals from shader data */
-  shaderdata_to_shaderglobals(kg, sd, path_flag, &kg->osl.shader_globals);
+  shaderdata_to_shaderglobals(sd, path_flag, &kg->osl.shader_globals);
 
   /* clear trace data */
   kg->osl.tracedata.init = false;
@@ -274,6 +277,52 @@ void osl_eval_nodes<SHADER_TYPE_DISPLACEMENT>(const ThreadKernelGlobalsCPU *kg,
 
   /* get back position */
   sd->P = TO_FLOAT3(globals->P);
+}
+
+/* Camera */
+
+packed_float3 osl_eval_camera(const ThreadKernelGlobalsCPU *kg,
+                              const packed_float3 sensor,
+                              const packed_float3 dSdx,
+                              const packed_float3 dSdy,
+                              const float2 rand_lens,
+                              packed_float3 &P,
+                              packed_float3 &dPdx,
+                              packed_float3 &dPdy,
+                              packed_float3 &D,
+                              packed_float3 &dDdx,
+                              packed_float3 &dDdy)
+{
+  if (!kg->osl.globals->camera_state) {
+    return zero_spectrum();
+  }
+
+  /* Setup shader globals from the sensor position. */
+  cameradata_to_shaderglobals(sensor, dSdx, dSdy, rand_lens, &kg->osl.shader_globals);
+
+  /* Clear trace data. */
+  kg->osl.tracedata.init = false;
+
+  /* Provide kernel globals to the render-services. */
+  kg->osl.shader_globals.kg = kg;
+
+  /* Execute the shader. */
+  OSL::ShadingSystem *ss = (OSL::ShadingSystem *)kg->osl.ss;
+  OSL::ShaderGlobals *globals = reinterpret_cast<OSL::ShaderGlobals *>(&kg->osl.shader_globals);
+  OSL::ShadingContext *octx = kg->osl.context;
+
+  float output[21] = {0.0f};
+
+  ss->execute(
+      *octx, *kg->osl.globals->camera_state, kg->osl.thread_index, 0, *globals, nullptr, output);
+
+  P = make_float3(output[0], output[1], output[2]);
+  dPdx = make_float3(output[3], output[4], output[5]);
+  dPdy = make_float3(output[6], output[7], output[8]);
+  D = make_float3(output[9], output[10], output[11]);
+  dDdx = make_float3(output[12], output[13], output[14]);
+  dDdy = make_float3(output[15], output[16], output[17]);
+  return make_float3(output[18], output[19], output[20]);
 }
 
 CCL_NAMESPACE_END

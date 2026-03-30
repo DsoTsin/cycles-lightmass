@@ -267,7 +267,7 @@ void BVHSpatialSplit::split(BVHBuild *builder,
   /* Duplicate or unsplit references intersecting both sides.
    *
    * Duplication happens into a temporary pre-allocated vector in order to
-   * reduce number of memmove() calls happening in vector.insert().
+   * reduce number of `memmove()` calls happening in `vector.insert()`.
    */
   vector<BVHReference> &new_refs = storage_->new_references;
   new_refs.clear();
@@ -449,11 +449,11 @@ void BVHSpatialSplit::split_point_primitive(const PointCloud *pointcloud,
   }
   point = get_unaligned_point(point);
 
-  if (point[dim] <= pos) {
+  if (point[dim] - radius <= pos) {
     left_bounds.grow(point, radius);
   }
 
-  if (point[dim] >= pos) {
+  if (point[dim] + radius >= pos) {
     right_bounds.grow(point, radius);
   }
 }

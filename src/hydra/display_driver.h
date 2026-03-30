@@ -32,12 +32,13 @@ class HdCyclesDisplayDriver final : public CCL_NS::DisplayDriver {
   CCL_NS::half4 *map_texture_buffer() override;
   void unmap_texture_buffer() override;
 
-  GraphicsInterop graphics_interop_get() override;
+  GraphicsInteropDevice graphics_interop_get_device() override;
+  void graphics_interop_update_buffer() override;
 
   void graphics_interop_activate() override;
   void graphics_interop_deactivate() override;
 
-  void clear() override;
+  void zero() override;
 
   void draw(const Params &params) override;
 
@@ -59,7 +60,8 @@ class HdCyclesDisplayDriver final : public CCL_NS::DisplayDriver {
   unsigned int gl_pbo_id_ = 0;
   CCL_NS::int2 pbo_size_ = CCL_NS::make_int2(0, 0);
   bool need_update_ = false;
-  std::atomic_bool need_clear_ = false;
+  std::atomic_bool need_zero_ = false;
+  std::atomic_bool need_recreate_interop_ = false;
 
   void *gl_render_sync_ = nullptr;
   void *gl_upload_sync_ = nullptr;

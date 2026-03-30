@@ -40,34 +40,33 @@ bool device_hip_init()
   int hipew_result = hipewInit(HIPEW_INIT_HIP);
 
   if (hipew_result == HIPEW_SUCCESS) {
-    VLOG_INFO << "HIPEW initialization succeeded";
+    LOG_INFO << "HIPEW initialization succeeded";
     if (!hipSupportsDriver()) {
-      VLOG_WARNING << "Driver version is too old";
+      LOG_WARNING << "Driver version is too old";
     }
     else if (HIPDevice::have_precompiled_kernels()) {
-      VLOG_INFO << "Found precompiled kernels";
+      LOG_INFO << "Found precompiled kernels";
       result = true;
     }
     else if (hipewCompilerPath() != nullptr) {
-      VLOG_INFO << "Found HIPCC " << hipewCompilerPath();
+      LOG_INFO << "Found HIPCC " << hipewCompilerPath();
       result = true;
     }
     else {
-      VLOG_INFO << "Neither precompiled kernels nor HIPCC was found,"
-                << " unable to use HIP";
+      LOG_INFO << "Neither precompiled kernels nor HIPCC was found,"
+               << " unable to use HIP";
     }
   }
   else {
     if (hipew_result == HIPEW_ERROR_ATEXIT_FAILED) {
-      VLOG_WARNING << "HIPEW initialization failed: Error setting up atexit() handler";
+      LOG_WARNING << "HIPEW initialization failed: Error setting up atexit() handler";
     }
     else if (hipew_result == HIPEW_ERROR_OLD_DRIVER) {
-      VLOG_WARNING
-          << "HIPEW initialization failed: Driver version too old, requires AMD Radeon Pro "
-             "24.Q2 driver or newer";
+      LOG_WARNING << "HIPEW initialization failed: Driver version too old, requires AMD Adrenalin "
+                     "driver 24.9.1 or newer, or AMD Radeon Pro driver 24.Q4 or newer";
     }
     else {
-      VLOG_WARNING << "HIPEW initialization failed: Error opening HIP dynamic library";
+      LOG_WARNING << "HIPEW initialization failed: Error opening HIP dynamic library";
     }
   }
 
@@ -95,7 +94,7 @@ unique_ptr<Device> device_hip_create(const DeviceInfo &info,
   (void)profiler;
   (void)headless;
 
-  LOG(FATAL) << "Request to create HIP device without compiled-in support. Should never happen.";
+  LOG_FATAL << "Request to create HIP device without compiled-in support. Should never happen.";
 
   return nullptr;
 #endif
@@ -129,7 +128,7 @@ void device_hip_info(vector<DeviceInfo> &devices)
   hipError_t result = device_hip_safe_init();
   if (result != hipSuccess) {
     if (result != hipErrorNoDevice) {
-      fprintf(stderr, "HIP hipInit: %s\n", hipewErrorString(result));
+      LOG_ERROR << "HIP hipInit: " << hipewErrorString(result);
     }
     return;
   }
@@ -137,7 +136,7 @@ void device_hip_info(vector<DeviceInfo> &devices)
   int count = 0;
   result = hipGetDeviceCount(&count);
   if (result != hipSuccess) {
-    fprintf(stderr, "HIP hipGetDeviceCount: %s\n", hipewErrorString(result));
+    LOG_ERROR << "HIP hipGetDeviceCount: " << hipewErrorString(result);
     return;
   }
 
@@ -154,7 +153,7 @@ void device_hip_info(vector<DeviceInfo> &devices)
 
     result = hipDeviceGetName(name, 256, num);
     if (result != hipSuccess) {
-      fprintf(stderr, "HIP :hipDeviceGetName: %s\n", hipewErrorString(result));
+      LOG_ERROR << "HIP hipDeviceGetName: " << hipewErrorString(result);
       continue;
     }
 
@@ -168,24 +167,26 @@ void device_hip_info(vector<DeviceInfo> &devices)
     info.description = string(name);
     info.num = num;
 
-    const bool is_rdna2_or_newer = hipIsRDNA2OrNewer(num);
-
-    /* Disable on RDNA1 due to apparent bug in HIP SDK 6.3. */
-    info.has_mnee = is_rdna2_or_newer;
+    /* Disable MNEE as it causes stalls or has rendering artifacts on most AMD GPU configurations
+     * due to compiler bugs. And as further adjustments have been made to other areas of Cycles,
+     * more and more AMD GPUs are affected by these issues. */
+    info.has_mnee = false;
     info.has_nanovdb = true;
 
     info.has_gpu_queue = true;
     /* Check if the device has P2P access to any other device in the system. */
     for (int peer_num = 0; peer_num < count && !info.has_peer_memory; peer_num++) {
       if (num != peer_num) {
-        int can_access = 0;
-        hipDeviceCanAccessPeer(&can_access, num, peer_num);
-        info.has_peer_memory = (can_access != 0);
+        if (hipSupportsDevice(peer_num)) {
+          int can_access = 0;
+          hipDeviceCanAccessPeer(&can_access, num, peer_num);
+          info.has_peer_memory = (can_access != 0);
+        }
       }
     }
 
     /* Disable on RDNA1 due to bug rendering curves in HIP-RT 2.5 or HIP SDK 6.3. */
-    info.use_hardware_raytracing = has_hardware_raytracing && is_rdna2_or_newer;
+    info.use_hardware_raytracing = has_hardware_raytracing && hipIsRDNA2OrNewer(num);
 
     int pci_location[3] = {0, 0, 0};
     hipDeviceGetAttribute(&pci_location[0], hipDeviceAttributePciDomainID, num);
@@ -217,21 +218,21 @@ void device_hip_info(vector<DeviceInfo> &devices)
     hipDeviceGetAttribute(&timeout_attr, hipDeviceAttributeKernelExecTimeout, num);
 
     if (timeout_attr) {
-      VLOG_INFO << "Device is recognized as display.";
+      LOG_INFO << "Device is recognized as display.";
       info.description += " (Display)";
       info.display_device = true;
       display_devices.push_back(info);
     }
     else {
-      VLOG_INFO << "Device has compute preemption or is not used for display.";
+      LOG_INFO << "Device has compute preemption or is not used for display.";
       devices.push_back(info);
     }
 
-    VLOG_INFO << "Added device \"" << info.description << "\" with id \"" << info.id << "\".";
+    LOG_INFO << "Added device \"" << info.description << "\" with id \"" << info.id << "\".";
 
     if (info.denoisers & DENOISER_OPENIMAGEDENOISE) {
-      VLOG_INFO << "Device with id \"" << info.id << "\" supports "
-                << denoiserTypeToHumanReadable(DENOISER_OPENIMAGEDENOISE) << ".";
+      LOG_INFO << "Device with id \"" << info.id << "\" supports "
+               << denoiserTypeToHumanReadable(DENOISER_OPENIMAGEDENOISE) << ".";
     }
   }
 

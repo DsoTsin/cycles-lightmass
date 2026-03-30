@@ -15,6 +15,7 @@
 #include "util/log.h"
 #include "util/string.h"
 
+#include "kernel/device/gpu/block_sizes.h"
 #include "kernel/types.h"
 
 CCL_NAMESPACE_BEGIN
@@ -157,8 +158,8 @@ void PathTraceWorkGPU::alloc_integrator_soa()
     if ((kernel_features & (feature))) { \
       string name_str = string_printf("%sintegrator_state_" #parent_struct "_" #name, \
                                       shadow ? "shadow_" : ""); \
-      VLOG_DEBUG << "Skipping " << name_str \
-                 << " -- data is packed inside integrator_state_" #parent_struct "_packed"; \
+      LOG_TRACE << "Skipping " << name_str \
+                << " -- data is packed inside integrator_state_" #parent_struct "_packed"; \
     }
 #  define KERNEL_STRUCT_BEGIN_PACKED(parent_struct, feature) \
     KERNEL_STRUCT_BEGIN(parent_struct) \
@@ -206,13 +207,13 @@ void PathTraceWorkGPU::alloc_integrator_soa()
 #undef KERNEL_STRUCT_END_ARRAY
 #undef KERNEL_STRUCT_VOLUME_STACK_SIZE
 
-  if (VLOG_IS_ON(3)) {
+  if (LOG_IS_ON(LOG_LEVEL_TRACE)) {
     size_t total_soa_size = 0;
     for (auto &&soa_memory : integrator_state_soa_) {
       total_soa_size += soa_memory->memory_size();
     }
 
-    VLOG_DEVICE_STATS << "GPU SoA state size: " << string_human_readable_size(total_soa_size);
+    LOG_TRACE << "GPU SoA state size: " << string_human_readable_size(total_soa_size);
   }
 }
 
@@ -241,17 +242,8 @@ void PathTraceWorkGPU::alloc_integrator_queue()
 
 void PathTraceWorkGPU::alloc_integrator_sorting()
 {
-  /* Compute sort partitions, to balance between memory locality and coherence.
-   * Sort partitioning becomes less effective when more shaders are in the wavefront. In lieu of a
-   * more sophisticated heuristic we simply disable sort partitioning if the shader count is high.
-   */
-  num_sort_partitions_ = 1;
-  if (device_scene_->data.max_shaders < 300) {
-    const int num_elements = queue_->num_sort_partition_elements();
-    if (num_elements) {
-      num_sort_partitions_ = max(max_num_paths_ / num_elements, 1);
-    }
-  }
+  num_sort_partitions_ = queue_->num_sort_partitions(max_num_paths_,
+                                                     device_scene_->data.max_shaders);
 
   integrator_state_gpu_.sort_partition_divisor = (int)divide_up(max_num_paths_,
                                                                 num_sort_partitions_);
@@ -570,6 +562,7 @@ void PathTraceWorkGPU::enqueue_path_iteration(DeviceKernel kernel, const int num
     case DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE_RAYTRACE:
     case DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE_MNEE:
     case DEVICE_KERNEL_INTEGRATOR_SHADE_VOLUME:
+    case DEVICE_KERNEL_INTEGRATOR_SHADE_VOLUME_RAY_MARCHING:
     case DEVICE_KERNEL_INTEGRATOR_SHADE_DEDICATED_LIGHT: {
       /* Shading kernels with integrator state and render buffer. */
       const DeviceKernelArguments args(
@@ -578,10 +571,9 @@ void PathTraceWorkGPU::enqueue_path_iteration(DeviceKernel kernel, const int num
       queue_->enqueue(kernel, work_size, args);
       break;
     }
-
     default:
-      LOG(FATAL) << "Unhandled kernel " << device_kernel_as_string(kernel)
-                 << " used for path iteration, should never happen.";
+      LOG_FATAL << "Unhandled kernel " << device_kernel_as_string(kernel)
+                << " used for path iteration, should never happen.";
       break;
   }
 }
@@ -601,8 +593,12 @@ void PathTraceWorkGPU::compute_sorted_queued_paths(DeviceKernel queued_kernel,
     const DeviceKernelArguments args(
         &work_size, &partition_size, &num_paths_limit, &d_queued_paths, &d_queued_kernel);
 
-    queue_->enqueue(DEVICE_KERNEL_INTEGRATOR_SORT_BUCKET_PASS, 1024 * num_sort_partitions_, args);
-    queue_->enqueue(DEVICE_KERNEL_INTEGRATOR_SORT_WRITE_PASS, 1024 * num_sort_partitions_, args);
+    queue_->enqueue(DEVICE_KERNEL_INTEGRATOR_SORT_BUCKET_PASS,
+                    GPU_PARALLEL_SORT_BLOCK_SIZE * num_sort_partitions_,
+                    args);
+    queue_->enqueue(DEVICE_KERNEL_INTEGRATOR_SORT_WRITE_PASS,
+                    GPU_PARALLEL_SORT_BLOCK_SIZE * num_sort_partitions_,
+                    args);
     return;
   }
 
@@ -934,7 +930,7 @@ int PathTraceWorkGPU::num_active_main_paths_paths()
   return num_paths;
 }
 
-bool PathTraceWorkGPU::should_use_graphics_interop()
+bool PathTraceWorkGPU::should_use_graphics_interop(PathTraceDisplay *display)
 {
   /* There are few aspects with the graphics interop when using multiple devices caused by the fact
    * that the PathTraceDisplay has a single texture:
@@ -948,13 +944,14 @@ bool PathTraceWorkGPU::should_use_graphics_interop()
 
   if (!interop_use_checked_) {
     Device *device = queue_->device;
-    interop_use_ = device->should_use_graphics_interop();
+    interop_use_ = device->should_use_graphics_interop(display->graphics_interop_get_device(),
+                                                       true);
 
     if (interop_use_) {
-      VLOG_INFO << "Using graphics interop GPU display update.";
+      LOG_INFO << "Using graphics interop GPU display update.";
     }
     else {
-      VLOG_INFO << "Using naive GPU display update.";
+      LOG_INFO << "Using naive GPU display update.";
     }
 
     interop_use_checked_ = true;
@@ -974,11 +971,11 @@ void PathTraceWorkGPU::copy_to_display(PathTraceDisplay *display,
   }
 
   if (!buffers_->buffer.device_pointer) {
-    LOG(WARNING) << "Request for GPU display update without allocated render buffers.";
+    LOG_WARNING << "Request for GPU display update without allocated render buffers.";
     return;
   }
 
-  if (should_use_graphics_interop()) {
+  if (should_use_graphics_interop(display)) {
     if (copy_to_display_interop(display, pass_mode, num_samples)) {
       return;
     }
@@ -1021,7 +1018,7 @@ void PathTraceWorkGPU::copy_to_display_naive(PathTraceDisplay *display,
     queue_->zero_to_device(display_rgba_half_);
   }
 
-  PassAccessor::Destination destination(film_->get_display_pass());
+  PassAccessor::Destination destination(film_->get_display_pass(), pass_mode);
   destination.d_pixels_half_rgba = display_rgba_half_.device_pointer;
 
   get_render_tile_film_pixels(destination, pass_mode, num_samples);
@@ -1040,15 +1037,15 @@ bool PathTraceWorkGPU::copy_to_display_interop(PathTraceDisplay *display,
     device_graphics_interop_ = queue_->graphics_interop_create();
   }
 
-  const DisplayDriver::GraphicsInterop graphics_interop_dst = display->graphics_interop_get();
-  device_graphics_interop_->set_display_interop(graphics_interop_dst);
+  GraphicsInteropBuffer &interop_buffer = display->graphics_interop_get_buffer();
+  device_graphics_interop_->set_buffer(interop_buffer);
 
   const device_ptr d_rgba_half = device_graphics_interop_->map();
   if (!d_rgba_half) {
     return false;
   }
 
-  PassAccessor::Destination destination = get_display_destination_template(display);
+  PassAccessor::Destination destination = get_display_destination_template(display, pass_mode);
   destination.d_pixels_half_rgba = d_rgba_half;
 
   get_render_tile_film_pixels(destination, pass_mode, num_samples);
@@ -1179,6 +1176,29 @@ void PathTraceWorkGPU::cryptomatte_postproces()
   queue_->enqueue(DEVICE_KERNEL_CRYPTOMATTE_POSTPROCESS, work_size, args);
 }
 
+void PathTraceWorkGPU::denoise_volume_guiding_buffers()
+{
+  const DeviceKernelArguments args(&buffers_->buffer.device_pointer,
+                                   &effective_buffer_params_.full_x,
+                                   &effective_buffer_params_.full_y,
+                                   &effective_buffer_params_.width,
+                                   &effective_buffer_params_.height,
+                                   &effective_buffer_params_.offset,
+                                   &effective_buffer_params_.stride);
+
+  {
+    const int work_size = effective_buffer_params_.width * effective_buffer_params_.height;
+    DCHECK_GT(work_size, 0);
+    queue_->enqueue(DEVICE_KERNEL_VOLUME_GUIDING_FILTER_X, work_size, args);
+  }
+
+  {
+    const int work_size = effective_buffer_params_.width;
+    DCHECK_GT(work_size, 0);
+    queue_->enqueue(DEVICE_KERNEL_VOLUME_GUIDING_FILTER_Y, work_size, args);
+  }
+}
+
 bool PathTraceWorkGPU::copy_render_buffers_from_device()
 {
   /* May not exist if cancelled before rendering started. */
@@ -1252,6 +1272,7 @@ bool PathTraceWorkGPU::kernel_creates_shadow_paths(DeviceKernel kernel)
           kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE_RAYTRACE ||
           kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE_MNEE ||
           kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_VOLUME ||
+          kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_VOLUME_RAY_MARCHING ||
           kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_DEDICATED_LIGHT);
 }
 

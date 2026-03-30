@@ -5,6 +5,7 @@
 #include "scene/pass.h"
 
 #include "util/log.h"
+#include "util/time.h"
 
 CCL_NAMESPACE_BEGIN
 
@@ -15,7 +16,7 @@ const char *pass_type_as_string(const PassType type)
   const NodeEnum *type_enum = Pass::get_type_enum();
 
   if (!type_enum->exists(type_int)) {
-    LOG(DFATAL) << "Unhandled pass type " << static_cast<int>(type) << ", not supposed to happen.";
+    LOG_DFATAL << "Unhandled pass type " << static_cast<int>(type) << ", not supposed to happen.";
     return "UNKNOWN";
   }
 
@@ -31,7 +32,7 @@ const char *pass_mode_as_string(PassMode mode)
       return "DENOISED";
   }
 
-  LOG(DFATAL) << "Unhandled pass mode " << static_cast<int>(mode) << ", should never happen.";
+  LOG_DFATAL << "Unhandled pass mode " << static_cast<int>(mode) << ", should never happen.";
   return "UNKNOWN";
 }
 
@@ -64,6 +65,8 @@ const NodeEnum *Pass::get_type_enum()
     pass_type_enum.insert("volume", PASS_VOLUME);
     pass_type_enum.insert("volume_direct", PASS_VOLUME_DIRECT);
     pass_type_enum.insert("volume_indirect", PASS_VOLUME_INDIRECT);
+    pass_type_enum.insert("volume_scatter", PASS_VOLUME_SCATTER);
+    pass_type_enum.insert("volume_transmit", PASS_VOLUME_TRANSMIT);
 
     /* Data passes. */
     pass_type_enum.insert("depth", PASS_DEPTH);
@@ -88,6 +91,9 @@ const NodeEnum *Pass::get_type_enum()
     pass_type_enum.insert("denoising_albedo", PASS_DENOISING_ALBEDO);
     pass_type_enum.insert("denoising_depth", PASS_DENOISING_DEPTH);
     pass_type_enum.insert("denoising_previous", PASS_DENOISING_PREVIOUS);
+    pass_type_enum.insert("volume_majorant", PASS_VOLUME_MAJORANT);
+    pass_type_enum.insert("volume_majorant_sample_count", PASS_VOLUME_MAJORANT_SAMPLE_COUNT);
+    pass_type_enum.insert("render_time", PASS_RENDER_TIME);
 
     pass_type_enum.insert("shadow_catcher", PASS_SHADOW_CATCHER);
     pass_type_enum.insert("shadow_catcher_sample_count", PASS_SHADOW_CATCHER_SAMPLE_COUNT);
@@ -139,7 +145,7 @@ Pass::Pass() : Node(get_node_type()), is_auto_(false) {}
 
 PassInfo Pass::get_info() const
 {
-  return get_info(type, include_albedo, !lightgroup.empty());
+  return get_info(type, mode, include_albedo, !lightgroup.empty());
 }
 
 bool Pass::is_written() const
@@ -147,7 +153,10 @@ bool Pass::is_written() const
   return get_info().is_written;
 }
 
-PassInfo Pass::get_info(const PassType type, const bool include_albedo, const bool is_lightgroup)
+PassInfo Pass::get_info(const PassType type,
+                        const PassMode mode,
+                        const bool include_albedo,
+                        const bool is_lightgroup)
 {
   PassInfo pass_info;
 
@@ -274,6 +283,24 @@ PassInfo Pass::get_info(const PassType type, const bool include_albedo, const bo
       pass_info.num_components = 3;
       pass_info.use_exposure = true;
       break;
+    case PASS_VOLUME_SCATTER:
+    case PASS_VOLUME_TRANSMIT:
+      /* Noisy buffer needs higher precision for accumulating the contribution, denoised buffer is
+       * used directly and thus can have lower resolution. */
+      pass_info.num_components = (mode == PassMode::NOISY) ? 3 : 1;
+      pass_info.use_exposure = true;
+      pass_info.use_filter = false;
+      pass_info.support_denoise = true;
+      break;
+    case PASS_VOLUME_MAJORANT:
+      pass_info.num_components = 1;
+      pass_info.use_filter = false;
+      pass_info.divide_type = PASS_VOLUME_MAJORANT_SAMPLE_COUNT;
+      break;
+    case PASS_VOLUME_MAJORANT_SAMPLE_COUNT:
+      pass_info.num_components = 1;
+      pass_info.use_filter = false;
+      break;
 
     case PASS_CRYPTOMATTE:
       pass_info.num_components = 4;
@@ -319,6 +346,12 @@ PassInfo Pass::get_info(const PassType type, const bool include_albedo, const bo
       pass_info.num_components = 1;
       pass_info.use_exposure = false;
       break;
+    case PASS_RENDER_TIME:
+      pass_info.num_components = 1;
+      pass_info.use_exposure = false;
+      pass_info.use_filter = false;
+      pass_info.scale = 1000.0f / float(time_fast_frequency());
+      break;
 
     case PASS_AOV_COLOR:
       pass_info.num_components = 4;
@@ -347,7 +380,7 @@ PassInfo Pass::get_info(const PassType type, const bool include_albedo, const bo
     case PASS_CATEGORY_DATA_END:
     case PASS_CATEGORY_BAKE_END:
     case PASS_NUM:
-      LOG(DFATAL) << "Unexpected pass type is used " << type;
+      LOG_DFATAL << "Unexpected pass type is used " << type;
       pass_info.num_components = 0;
       break;
     case PASS_GUIDING_COLOR:
@@ -436,6 +469,11 @@ std::ostream &operator<<(std::ostream &os, const Pass &pass)
   os << ", is_written: " << string_from_bool(pass.is_written());
 
   return os;
+}
+
+bool is_volume_guiding_pass(const PassType pass_type)
+{
+  return (pass_type == PASS_VOLUME_SCATTER) || (pass_type == PASS_VOLUME_TRANSMIT);
 }
 
 CCL_NAMESPACE_END

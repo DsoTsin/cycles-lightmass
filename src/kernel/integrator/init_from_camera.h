@@ -16,20 +16,22 @@
 
 CCL_NAMESPACE_BEGIN
 
-ccl_device_inline void integrate_camera_sample(KernelGlobals kg,
-                                               const int sample,
-                                               const int x,
-                                               const int y,
-                                               const uint rng_pixel,
-                                               ccl_private Ray *ray)
+ccl_device_inline Spectrum integrate_camera_sample(KernelGlobals kg,
+                                                   const int sample,
+                                                   const int x,
+                                                   const int y,
+                                                   const uint rng_pixel,
+                                                   ccl_private Ray *ray)
 {
   /* Filter sampling. */
   const float2 rand_filter = (sample == 0) ? make_float2(0.5f, 0.5f) :
                                              path_rng_2D(kg, rng_pixel, sample, PRNG_FILTER);
 
   /* Motion blur (time) and depth of field (lens) sampling. (time, lens_x, lens_y) */
-  const float3 rand_time_lens = (kernel_data.cam.shuttertime != -1.0f ||
-                                 kernel_data.cam.aperturesize > 0.0f) ?
+  const bool use_motionblur = kernel_data.cam.shuttertime != -1.0f;
+  const bool use_dof = kernel_data.cam.aperturesize > 0.0f;
+  const bool use_custom_cam = kernel_data.cam.type == CAMERA_CUSTOM;
+  const float3 rand_time_lens = (use_motionblur || use_dof || use_custom_cam) ?
                                     path_rng_3D(kg, rng_pixel, sample, PRNG_LENS_TIME) :
                                     zero_float3();
 
@@ -45,7 +47,7 @@ ccl_device_inline void integrate_camera_sample(KernelGlobals kg,
   const float2 rand_lens = make_float2(rand_time_lens.y, rand_time_lens.z);
 
   /* Generate camera ray. */
-  camera_sample(kg, x, y, rand_filter, rand_time, rand_lens, ray);
+  return camera_sample(kg, x, y, rand_filter, rand_time, rand_lens, ray);
 }
 
 /* Return false to indicate that this pixel is finished.
@@ -80,28 +82,26 @@ ccl_device bool integrator_init_from_camera(KernelGlobals kg,
   /* Initialize random number seed for path. */
   const uint rng_pixel = path_rng_pixel_init(kg, sample, x, y);
 
-  {
-    /* Generate camera ray. */
-    Ray ray;
-    integrate_camera_sample(kg, sample, x, y, rng_pixel, &ray);
-    if (ray.tmax == 0.0f) {
-      return true;
-    }
-
-    /* Write camera ray to state. */
-    integrator_state_write_ray(state, &ray);
+  /* Generate camera ray. */
+  Ray ray;
+  Spectrum T = integrate_camera_sample(kg, sample, x, y, rng_pixel, &ray);
+  if (is_zero(T)) {
+    return true;
   }
 
+  /* Write camera ray to state. */
+  integrator_state_write_ray(state, &ray);
+
   /* Initialize path state for path integration. */
-  path_state_init_integrator(kg, state, sample, rng_pixel);
+  path_state_init_integrator(kg, state, sample, rng_pixel, T);
 
   /* Continue with intersect_closest kernel, optionally initializing volume
    * stack before that if the camera may be inside a volume. */
   if (kernel_data.cam.is_inside_volume) {
-    integrator_path_init(kg, state, DEVICE_KERNEL_INTEGRATOR_INTERSECT_VOLUME_STACK);
+    integrator_path_init(state, DEVICE_KERNEL_INTEGRATOR_INTERSECT_VOLUME_STACK);
   }
   else {
-    integrator_path_init(kg, state, DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST);
+    integrator_path_init(state, DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST);
   }
 
   return true;

@@ -15,6 +15,9 @@
 
 #  define MAX_SAMPLE_BUFFER_LENGTH 4096
 
+/* The number of resources to be contiguously encoded into the MetalAncillaries struct. */
+#  define ANCILLARY_SLOT_COUNT 11
+
 CCL_NAMESPACE_BEGIN
 
 class MetalDevice;
@@ -27,7 +30,7 @@ class MetalDeviceQueue : public DeviceQueue {
 
   int num_concurrent_states(const size_t /*state_size*/) const override;
   int num_concurrent_busy_states(const size_t /*state_size*/) const override;
-  int num_sort_partition_elements() const override;
+  int num_sort_partitions(int max_num_paths, uint max_scene_shaders) const override;
   bool supports_local_atomic_sort() const override;
 
   void init_execution() override;
@@ -44,6 +47,8 @@ class MetalDeviceQueue : public DeviceQueue {
 
   void *native_queue() override;
 
+  unique_ptr<DeviceGraphicsInterop> graphics_interop_create() override;
+
  protected:
   void setup_capture();
   void update_capture(DeviceKernel kernel);
@@ -55,7 +60,6 @@ class MetalDeviceQueue : public DeviceQueue {
   id<MTLBlitCommandEncoder> get_blit_encoder();
 
   MetalDevice *metal_device_;
-  MetalBufferPool temp_buffer_pool_;
 
   API_AVAILABLE(macos(11.0), ios(14.0))
   MTLCommandBufferDescriptor *command_buffer_desc_ = nullptr;

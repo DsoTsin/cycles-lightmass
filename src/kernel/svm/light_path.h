@@ -93,6 +93,12 @@ ccl_device_noinline void svm_node_light_path(KernelGlobals kg,
         info = (float)integrator_state_transmission_bounce(state, path_flag);
       }
       break;
+    case NODE_LP_ray_portal:
+      IF_KERNEL_NODES_FEATURE(LIGHT_PATH)
+      {
+        info = (float)integrator_state_portal_bounce(kg, state, path_flag);
+      }
+      break;
   }
 
   stack_store_float(stack, out_offset, info);

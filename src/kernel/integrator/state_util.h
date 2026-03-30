@@ -96,7 +96,7 @@ ccl_device_forceinline void integrator_state_read_shadow_ray(ConstIntegratorShad
 }
 
 ccl_device_forceinline void integrator_state_write_shadow_ray_self(
-    KernelGlobals kg, IntegratorShadowState state, const ccl_private Ray *ccl_restrict ray)
+    IntegratorShadowState state, const ccl_private Ray *ccl_restrict ray)
 {
   /* There is a bit of implicit knowledge about the way how the kernels are invoked and what the
    * state is actually storing. Special logic here is needed because the intersect_shadow kernel
@@ -134,7 +134,7 @@ ccl_device_forceinline void integrator_state_write_shadow_ray_self(
 }
 
 ccl_device_forceinline void integrator_state_read_shadow_ray_self(
-    KernelGlobals kg, ConstIntegratorShadowState state, ccl_private Ray *ccl_restrict ray)
+    ConstIntegratorShadowState state, ccl_private Ray *ccl_restrict ray)
 {
   ray->self.object = INTEGRATOR_STATE_ARRAY(
       state, shadow_isect, INTEGRATOR_SHADOW_ISECT_SIZE - 1, object);
@@ -230,7 +230,7 @@ ccl_device_forceinline void integrator_state_copy_volume_stack_to_shadow(
       INTEGRATOR_STATE_ARRAY_WRITE(shadow_state, shadow_volume_stack, index, shader) = shader;
 
       ++index;
-    } while (shader != OBJECT_NONE);
+    } while (shader != SHADER_NONE);
   }
 }
 
@@ -249,7 +249,7 @@ ccl_device_forceinline void integrator_state_copy_volume_stack(KernelGlobals kg,
       INTEGRATOR_STATE_ARRAY_WRITE(to_state, volume_stack, index, shader) = shader;
 
       ++index;
-    } while (shader != OBJECT_NONE);
+    } while (shader != SHADER_NONE);
   }
 }
 
@@ -530,6 +530,25 @@ ccl_device_inline int integrator_state_transparent_bounce(ConstIntegratorShadowS
 {
   return INTEGRATOR_STATE(state, shadow_path, transparent_bounce);
 }
+
+ccl_device_inline int integrator_state_portal_bounce(KernelGlobals kg,
+                                                     ConstIntegratorState state,
+                                                     const int /*unused*/)
+{
+  return (kernel_data.kernel_features & KERNEL_FEATURE_NODE_PORTAL) ?
+             INTEGRATOR_STATE(state, path, portal_bounce) :
+             0;
+}
+
+ccl_device_inline int integrator_state_portal_bounce(KernelGlobals kg,
+                                                     ConstIntegratorShadowState state,
+                                                     const int /*unused*/)
+{
+  return (kernel_data.kernel_features & KERNEL_FEATURE_NODE_PORTAL) ?
+             INTEGRATOR_STATE(state, shadow_path, portal_bounce) :
+             0;
+}
+
 #else
 ccl_device_inline int integrator_state_bounce(ConstIntegratorShadowState state,
                                               const uint32_t path_flag)
@@ -566,6 +585,18 @@ ccl_device_inline int integrator_state_transparent_bounce(ConstIntegratorShadowS
   return (path_flag & PATH_RAY_SHADOW) ? INTEGRATOR_STATE(state, shadow_path, transparent_bounce) :
                                          INTEGRATOR_STATE(state, path, transparent_bounce);
 }
+
+ccl_device_inline int integrator_state_portal_bounce(KernelGlobals kg,
+                                                     ConstIntegratorShadowState state,
+                                                     const uint32_t path_flag)
+{
+  if ((kernel_data.kernel_features & KERNEL_FEATURE_NODE_PORTAL) == 0) {
+    return 0;
+  }
+  return (path_flag & PATH_RAY_SHADOW) ? INTEGRATOR_STATE(state, shadow_path, portal_bounce) :
+                                         INTEGRATOR_STATE(state, path, portal_bounce);
+}
+
 #endif
 
 CCL_NAMESPACE_END

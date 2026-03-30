@@ -87,7 +87,7 @@ unique_ptr<Device> device_oneapi_create(const DeviceInfo &info,
   (void)profiler;
   (void)headless;
 
-  LOG(FATAL) << "Requested to create oneAPI device while not enabled for this build.";
+  LOG_FATAL << "Requested to create oneAPI device while not enabled for this build.";
 
   return nullptr;
 #endif
@@ -99,6 +99,7 @@ static void device_iterator_cb(const char *id,
                                const int num,
                                bool hwrt_support,
                                bool oidn_support,
+                               bool has_execution_optimization,
                                void *user_ptr)
 {
   vector<DeviceInfo> *devices = (vector<DeviceInfo> *)user_ptr;
@@ -140,12 +141,14 @@ static void device_iterator_cb(const char *id,
   (void)hwrt_support;
 #  endif
 
+  info.has_execution_optimization = has_execution_optimization;
+
   devices->push_back(info);
-  VLOG_INFO << "Added device \"" << info.description << "\" with id \"" << info.id << "\".";
+  LOG_INFO << "Added device \"" << info.description << "\" with id \"" << info.id << "\".";
 
   if (info.denoisers & DENOISER_OPENIMAGEDENOISE) {
-    VLOG_INFO << "Device with id \"" << info.id << "\" supports "
-              << denoiserTypeToHumanReadable(DENOISER_OPENIMAGEDENOISE) << ".";
+    LOG_INFO << "Device with id \"" << info.id << "\" supports "
+             << denoiserTypeToHumanReadable(DENOISER_OPENIMAGEDENOISE) << ".";
   }
 }
 #endif
